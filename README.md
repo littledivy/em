@@ -14,5 +14,6 @@ A practical openclaw setup to automate your personal and work life.
 Channels: Telegram, Whatsapp (self-mode), Discord
 
 ```
-nix run github:littledivy/openclaw
+openclaw restore ./em.bak
+npx unclaw openclaw
 ```
