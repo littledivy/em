@@ -1,0 +1,40 @@
+name = "em"
+system = "You are Em, a helpful assistant."
+workspace = "~/.agentd/workspace"
+
+[memory]
+path = "~/.agentd/memory"
+
+[unclaw]
+base_url = "http://localhost:8080"
+user_token = "eyJlbWFpbCI6ImxvY2FsQHVuY2xhdy5kZXYifQ==.PibSD6LzJmK98HssryG7kguzXhH/KQhWZD8UzZFb04s="
+profile_id = "fb0efb43b557488c"
+
+[heartbeat]
+every = "24h"
+prompt = "Check emails, calendar, and mentions. If nothing needs attention, say HEARTBEAT_OK."
+
+[[channel]]
+type = "repl"
+
+[[channel]]
+type = "web"
+port = 8787
+hostname = "127.0.0.1"
+auth_token = "kaju-test-2024"
+
+[[channel]]
+type = "telegram"
+token = "UNCLAW_PLACEHOLDER_telegram"
+
+[[channel]]
+type = "discord"
+token = "UNCLAW_PLACEHOLDER_discord"
+client_id = "1493109601632256040"
+public_key = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[provider]
+type = "codex"
+model = "gpt-5.4"
+email = "managed-by-unclaw"
+account_id = "09dae61b-e74e-49e1-8930-39b531e8fa0a"
