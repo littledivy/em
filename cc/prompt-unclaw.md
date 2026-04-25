@@ -11,7 +11,7 @@ Steps:
 5. Print:
    - Line 1 exactly: `<<NODE_BOT_DONE>> <full PR title>` — conventional-commit form (`fix:`, `feat:`, `chore:`, etc), subject only, no period, ≤70 chars. Used verbatim as commit subject and PR title.
    - Then a blank line, then the **PR body** in markdown. Anything you write after the sentinel line, until end of message, becomes the PR body verbatim. Cover: motivation (link the issue), what changed (per-file or per-area), why this approach, and the test plan. Reviewer should be able to merge from the body alone.
-6. After the orchestrator opens the PR, it'll paste back instructions to monitor CI. Stay alive, kick off `gh pr checks <PR> --watch --repo denoland/unclaw` in the background (run_in_background=true), and use the **Monitor tool** to watch its output — event-driven, no sleep loops. On any failure, fix + commit + `git push origin HEAD`, then relaunch watch. Signal `<<NODE_BOT_DONE>> ci passed` once everything is green.
+6. After the orchestrator opens the PR, it'll paste detailed CI-watch instructions. Pattern: run `gh pr checks <PR> --watch --repo denoland/unclaw` via Bash with `run_in_background=true`, then attach the **Monitor tool** to the resulting bg task_id (streaming mode — new stdout lines = events; no output = zero tokens). Don't use Monitor's periodic `--every` mode and don't sleep-poll. React only when a Monitor event arrives. On failure: fix + commit + push + relaunch. Signal `<<NODE_BOT_DONE>> ci passed` when green.
 
 Constraints:
 - Soft target ~5 files / ~200 LOC.

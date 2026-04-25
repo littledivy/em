@@ -480,23 +480,23 @@ def post_worker(task: str) -> None:
     pr_num = pr_url.rsplit("/", 1)[-1] if pr_url else ""
     task_update(task, status="monitoring", pr_url=pr_url, last_pr_hash="")
 
-    # Worker stays alive and uses the Monitor tool for event-driven CI watching (no sleep-polling).
+    # Worker stays alive and uses the Monitor tool in STREAMING mode (attached to a bg subprocess), not periodic polling.
     watch_msg = f"""PR opened: {pr_url}.
 
-Now monitor CI in event-driven mode using the Monitor tool (NOT sleep loops, NOT periodic polling):
+Watch CI by attaching the Monitor tool to a streaming background process — NOT a periodic Monitor check.
 
-1. Start the gh watch in the background via Bash with run_in_background=true:
-   `gh pr checks {pr_num} --watch --repo {UPSTREAM_REPO}`
-2. Attach the Monitor tool to that background task. Each new line from `gh pr checks --watch` is an event — react when one fires.
-3. When the watch process exits (all checks resolved):
-   - If all GREEN/SKIPPED: print exactly `<<NODE_BOT_DONE>> ci passed` and stop.
-   - If any FAILURE: `gh run view --log-failed --repo {UPSTREAM_REPO} <run-id>`. Find root cause. Fix in this worktree. Then:
-       git add -A
-       git commit -m "<concise message>"
-       git push bot HEAD
-     Re-launch the watch in background + Monitor again. Repeat until green.
+EXACT pattern:
+1. Run `gh pr checks {pr_num} --watch --repo {UPSTREAM_REPO}` via the Bash tool with `run_in_background=true`. That returns a task_id for the background process.
+2. Call the Monitor tool with that task_id. Monitor will surface ONLY new stdout lines from gh — i.e. each event fires exactly when a check transitions (queued → in_progress → pass/fail). No new stdout = no Monitor event = zero token cost.
+3. Wait silently. Don't reply on uneventful wakes (no "Routine." replies — that means you're polling, stop). React ONLY when a Monitor event delivers a check failure or the watch process exits.
+4. When the watch exits with all checks GREEN/SKIPPED: print exactly `<<NODE_BOT_DONE>> ci passed`.
+5. On any FAILURE: `gh run view --log-failed --repo {UPSTREAM_REPO} <run-id>`. Fix root cause. Then:
+     git add -A
+     git commit -m "<concise message>"
+     git push bot HEAD
+   Re-launch the bg watch + reattach Monitor. Repeat until green.
 
-Do NOT use `sleep && gh pr checks` loops or `time.sleep` polling — that wastes tokens on idle ticks. Monitor only consumes tokens when there's actual output to react to."""
+DO NOT: use Monitor in `--every <duration>` mode, use sleep-polling, or run `gh pr checks` without --watch + run_in_background. Those waste tokens on every wake."""
     tmux_paste(session, watch_msg)
     log(f"ci-watch handoff (Monitor-tool-based): {task} ({pr_url})")
 
@@ -740,20 +740,16 @@ def poll_unclaw() -> None:
             )
             watch_msg = f"""PR opened: {pr_url}.
 
-Now monitor CI in event-driven mode using the Monitor tool (NOT sleep loops, NOT periodic polling):
+Watch CI by attaching the Monitor tool to a streaming background process — NOT a periodic Monitor check.
 
-1. Start the gh watch in the background via Bash with run_in_background=true:
-   `gh pr checks {pr_num} --watch --repo {UNCLAW_UPSTREAM}`
-2. Attach the Monitor tool to that background task. Each new line is an event.
-3. When the watch process exits:
-   - All GREEN/SKIPPED: print exactly `<<NODE_BOT_DONE>> ci passed` and stop.
-   - Any FAILURE: `gh run view --log-failed --repo {UNCLAW_UPSTREAM} <run-id>`. Find root cause. Fix in this worktree. Then:
-       git add -A
-       git commit -m "<concise message>"
-       git push origin HEAD
-     Re-launch the watch in background + Monitor again. Repeat until green.
+EXACT pattern:
+1. Run `gh pr checks {pr_num} --watch --repo {UNCLAW_UPSTREAM}` via the Bash tool with `run_in_background=true`. That returns a task_id for the bg process.
+2. Call the Monitor tool with that task_id. Monitor will surface ONLY new stdout lines — i.e. each event fires when a check transitions. No output = no event = zero token cost.
+3. Wait silently. Don't reply on uneventful wakes. React ONLY when a Monitor event arrives.
+4. All GREEN/SKIPPED on watch exit: print `<<NODE_BOT_DONE>> ci passed`.
+5. Any FAILURE: fix → `git add -A && git commit -m "..." && git push origin HEAD` → relaunch bg watch + reattach Monitor.
 
-Do NOT use `sleep && gh pr checks` loops or `time.sleep` polling — Monitor is event-driven and only spends tokens when there's actual output."""
+DO NOT: use Monitor in `--every` mode, use sleep-polling, or run `gh pr checks` without --watch + run_in_background."""
             tmux_paste(session, watch_msg)
             log(f"unclaw ci-watch handoff (Monitor-tool-based): {slug}")
             continue
