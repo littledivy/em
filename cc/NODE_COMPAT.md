@@ -146,9 +146,8 @@ Soft scope target: ~5 files / ~200 LOC. Hard sprawl auto-abandon at >10 files or
 - **Worker keeps fighting toolchain (libiconv/dsymutil/cmake)** — they're using bare `cargo`. Send inbox: "use `nix develop -c cargo ...`". prompt.md already says this.
 - **Worktree exists conflict on respawn** — pre-existing worktree from prior failed run. `git -C ~/src/deno worktree remove --force <path>` then re-tick.
 
-## Constraints to keep workers from sprawling
+## Constraints
 
-- No Rust core edits. Worker must `<<NODE_BOT_ESCALATE>>` if a fix needs Rust (`deno_core`, `ext/node` Rust, V8). Operator handles those manually.
-- ESCALATE if test depends on unimplemented Node feature (e.g. `process.binding('uv')`, `--pending-deprecation`, `internal/...` modules).
-- Soft target ~5 files / ~200 LOC; auto-abandon at 10 files / 400 LOC.
+- Workers can touch ANY file — polyfills, Rust ops, V8 bindings, runtime, CLI. No size/file caps.
+- ESCALATE only when the test genuinely depends on something that doesn't exist (e.g. `process.binding('uv')`, `internal/...` modules that Deno doesn't expose) or after honest investigation decides the fix isn't worth shipping.
 - Worktree-only; never touch the base `~/src/deno` checkout.

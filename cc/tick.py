@@ -53,8 +53,6 @@ SOCKET = SOCKET_DIR / "deno-bot.sock"
 
 CONCURRENT_CAP = 3
 OPEN_PR_CAP = 10  # max PRs currently open (review/monitoring); merged/closed free a slot
-SPRAWL_FILES = 10
-SPRAWL_LOC = 400
 ATTEMPTS_CAP = 5
 IDLE_TICKS_CAP = 4
 
@@ -63,20 +61,11 @@ VIEWER_URL = os.environ.get(
     "https://node-test-viewer.deno.dev/results/latest/darwin.json",
 )
 
-# Test categories that almost always need Rust core — auto-picker fallback skips these.
-PICKER_SKIP_RE = re.compile(
-    r"tls|cluster|spawn|fork|child[-_]process|http2|inspector|debugger|repl|"
-    r"wasm|v8|napi|worker[-_]thread|trace|perf_hook|dgram|dns|zlib|snapshot|"
-    r"heap|sqlite|sea|preload|loader|esm|cli-|domain"
-)
+# Auto-picker filter is now minimal — workers can land Rust changes too. Only skip tests that
+# inherently require Node internals (--expose-internals, internal/...) which Deno doesn't expose.
+PICKER_SKIP_RE = re.compile(r"^$")  # nothing skipped by name
 TEST_FILE_FLAG_SKIPS = (
     "--expose-internals",
-    "--disable-proto",
-    "--pending-deprecation",
-    "--require",
-    "--input-type",
-    "--build-snapshot",
-    "--heap-prof",
     "internal/",
 )
 
@@ -434,17 +423,6 @@ def post_worker(task: str) -> None:
             shutil.rmtree(wt / "target", ignore_errors=True)
             return
         log(f"no uncommitted diff but PR exists — pushing any local commits: {task}")
-
-    # Sprawl check (only if we have uncommitted changes — already-committed work is past the gate)
-    if has_uncommitted:
-        diff_files = git("diff", "--name-only", "HEAD", cwd=wt).stdout.splitlines()
-        m = re.search(r"(\d+) insertion", git("diff", "--shortstat", "HEAD", cwd=wt).stdout)
-        loc = int(m.group(1)) if m else 0
-        if len(diff_files) > SPRAWL_FILES or loc > SPRAWL_LOC:
-            log(f"scope sprawl ({len(diff_files)} files / {loc} loc): {task}")
-            task_update(task, status="abandoned", last_error=f"sprawl files={len(diff_files)} loc={loc}")
-            tmux_kill(session)
-            return
 
     token = gh_token(BOT_USER)
     env = git_env(BOT_USER)
