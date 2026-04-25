@@ -33,6 +33,7 @@ INBOX = ROOT / "inbox"
 QUEUE = ROOT / "queue.txt"
 HALT = ROOT / "halt"
 LOGS = ROOT / "logs"
+PAGES = ROOT / "pages.txt"  # pending wake reasons for the orchestrator (drained when operator pings or I check)
 
 DENO = Path(os.environ.get("DENO", Path.home() / "src/deno"))
 WT_BASE = Path(os.environ.get("WT_BASE", Path.home() / "src/deno-wt"))
@@ -102,7 +103,35 @@ def now_iso() -> str:
 
 
 def log(msg: str) -> None:
-    print(f"[{now_iso()}] {msg}")
+    line = f"[{now_iso()}] {msg}"
+    print(line)
+    try:
+        (LOGS / "tick.log").parent.mkdir(parents=True, exist_ok=True)
+        with (LOGS / "tick.log").open("a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def page(reason: str) -> None:
+    """Wake the orchestrator: append to pages.txt + macOS notification.
+    Use sparingly — only when a human-in-the-loop call is needed."""
+    try:
+        PAGES.parent.mkdir(parents=True, exist_ok=True)
+        with PAGES.open("a") as f:
+            f.write(f"[{now_iso()}] {reason}\n")
+    except Exception:
+        pass
+    log(f"PAGE: {reason}")
+    # Best-effort macOS notification (silent if osascript missing)
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{reason[:200]}" with title "deno-bot"'],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
 
 
 # ── shell helpers ─────────────────────────────────────────────────────────────
@@ -501,6 +530,7 @@ def poll_running() -> None:
             continue
         if detect_escalate(pane):
             log(f"ESCALATE: {task}")
+            page(f"worker ESCALATEd: {task}")
             task_update(task, status="abandoned", last_error="escalate")
             tmux_kill(session)
             shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
@@ -713,6 +743,7 @@ def poll_review() -> None:
             if repo == UPSTREAM_REPO:
                 shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             log(f"closed ({repo}): {task}")
+            page(f"PR closed unmerged: {repo}#{pr_num} ({task})")
             continue
 
         h, _, inline = fetch_pr_signal(pr_num, repo)
@@ -747,6 +778,7 @@ def poll_review() -> None:
         if attempts >= ATTEMPTS_CAP:
             task_update(task, status="abandoned", last_error="attempts exhausted")
             log(f"exhausted: {task}")
+            page(f"attempts exhausted ({ATTEMPTS_CAP}) on {task} — PR {row['pr_url']}")
             continue
 
         respawn_worker_for_feedback(task, repo, pr_num, counts)
