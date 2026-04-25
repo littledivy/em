@@ -459,28 +459,9 @@ def post_worker(task: str) -> None:
         pr_url = out.stdout.strip().splitlines()[-1] if out.returncode == 0 else ""
         log(f"PR: {pr_url}")
 
-    pr_num = pr_url.rsplit("/", 1)[-1] if pr_url else ""
-    task_update(task, status="monitoring", pr_url=pr_url, last_pr_hash="")
-
-    # Worker stays alive and uses the Monitor tool in STREAMING mode (attached to a bg subprocess), not periodic polling.
-    watch_msg = f"""PR opened: {pr_url}.
-
-Watch CI by attaching the Monitor tool to a streaming background process — NOT a periodic Monitor check.
-
-EXACT pattern:
-1. Run `gh pr checks {pr_num} --watch --repo {UPSTREAM_REPO}` via the Bash tool with `run_in_background=true`. That returns a task_id for the background process.
-2. Call the Monitor tool with that task_id. Monitor will surface ONLY new stdout lines from gh — i.e. each event fires exactly when a check transitions (queued → in_progress → pass/fail). No new stdout = no Monitor event = zero token cost.
-3. Wait silently. Don't reply on uneventful wakes (no "Routine." replies — that means you're polling, stop). React ONLY when a Monitor event delivers a check failure or the watch process exits.
-4. When the watch exits with all checks GREEN/SKIPPED: print exactly `<<NODE_BOT_DONE>> ci passed`.
-5. On any FAILURE: `gh run view --log-failed --repo {UPSTREAM_REPO} <run-id>`. Fix root cause. Then:
-     git add -A
-     git commit -m "<concise message>"
-     git push bot HEAD
-   Re-launch the bg watch + reattach Monitor. Repeat until green.
-
-DO NOT: use Monitor in `--every <duration>` mode, use sleep-polling, or run `gh pr checks` without --watch + run_in_background. Those waste tokens on every wake."""
-    tmux_paste(session, watch_msg)
-    log(f"ci-watch handoff (Monitor-tool-based): {task} ({pr_url})")
+    task_update(task, status="review", pr_url=pr_url, last_pr_hash="")
+    tmux_kill(session)
+    log(f"PR opened, session killed; review-poll handles CI/comments/conflicts: {task}")
 
 
 # ── poll loops ────────────────────────────────────────────────────────────────
@@ -598,39 +579,15 @@ def handle_no_action(task: str) -> None:
 
 
 def poll_monitoring() -> None:
-    """Workers in 'monitoring' use the Monitor tool to watch `gh pr checks --watch` events. They print
-    <<NODE_BOT_DONE>> ci passed once green, <<NODE_BOT_ESCALATE>> if stuck."""
-    for row in tasks_with("monitoring", exclude_unclaw=True):
+    """Big mode is gone. Transition any leftover 'monitoring' tasks to 'review' + kill session."""
+    for row in tasks_with("monitoring"):
         task = row["id"]
-        pr_url = row.get("pr_url") or ""
-        session = session_for_dn(task)
-        if not tmux_has_session(session):
-            log(f"monitor session died → review: {task}")
-            task_update(task, status="review")
-            continue
-        pane = tmux_capture(session)
-        if detect_ci_passed(pane):
-            log(f"ci green: {task} ({pr_url})")
-            task_update(task, status="review")
-            tmux_kill(session)
-            continue
-        if detect_escalate(pane):
-            log(f"ci escalated: {task} ({pr_url})")
-            task_update(task, status="review", last_error="ci-watch escalated")
-            tmux_kill(session)
-            continue
-        # Maintainer feedback (reviews/inline) isn't visible to the worker's gh-pr-checks-watch — orchestrator catches it.
-        pr_num = pr_url.rsplit("/", 1)[-1]
-        pr_data = gh_json("pr", "view", pr_num, "--json", "reviews", repo=UPSTREAM_REPO) or {}
-        review_n = sum(1 for r in pr_data.get("reviews") or [] if r.get("state") in ("CHANGES_REQUESTED", "COMMENTED"))
-        inline_out = run("gh", "api", f"repos/{UPSTREAM_REPO}/pulls/{pr_num}/comments")
-        inline = json.loads(inline_out.stdout) if inline_out.returncode == 0 else []
-        if review_n > 0 or len(inline) > 0:
-            log(f"monitor → review: {task} ({pr_url}) — maintainer feedback detected")
-            task_update(task, status="review", last_pr_hash="")
-            tmux_kill(session)
-            continue
-        log(f"ci-watching: {task}")
+        log(f"monitoring → review (Big mode removed): {task}")
+        task_update(task, status="review", last_pr_hash="")
+        if task.startswith("unclaw:"):
+            tmux_kill(session_for_unc(task.removeprefix("unclaw:")))
+        else:
+            tmux_kill(session_for_dn(task))
 
 
 def poll_unclaw() -> None:
@@ -664,19 +621,11 @@ def poll_unclaw() -> None:
             log(f"unclaw addressing feedback: {slug}")
             continue
 
-        # CI-watch phase: worker uses Monitor tool to watch gh pr checks --watch events.
+        # Big mode removed; transition leftover 'monitoring' to 'review'.
         if cur_status == "monitoring":
-            if detect_ci_passed(pane):
-                log(f"unclaw ci green: {slug}")
-                task_update(task_id, status="review", last_pr_hash="")
-                tmux_kill(session)
-                continue
-            if detect_escalate(pane):
-                log(f"unclaw ci escalated: {slug}")
-                task_update(task_id, status="review", last_error="ci-watch escalated")
-                tmux_kill(session)
-                continue
-            log(f"unclaw ci-watching: {slug}")
+            log(f"unclaw monitoring → review (Big mode removed): {slug}")
+            task_update(task_id, status="review", last_pr_hash="")
+            tmux_kill(session)
             continue
 
         # Phase: initial-fix — DONE → commit + push + open PR + hand off to CI watch
@@ -717,23 +666,11 @@ def poll_unclaw() -> None:
             log(f"unclaw PR: {pr_url}")
 
             task_insert(
-                task_id, status="monitoring", branch=branch, pr_url=pr_url,
+                task_id, status="review", branch=branch, pr_url=pr_url,
                 repo=UNCLAW_UPSTREAM, last_pr_hash="",
             )
-            watch_msg = f"""PR opened: {pr_url}.
-
-Watch CI by attaching the Monitor tool to a streaming background process — NOT a periodic Monitor check.
-
-EXACT pattern:
-1. Run `gh pr checks {pr_num} --watch --repo {UNCLAW_UPSTREAM}` via the Bash tool with `run_in_background=true`. That returns a task_id for the bg process.
-2. Call the Monitor tool with that task_id. Monitor will surface ONLY new stdout lines — i.e. each event fires when a check transitions. No output = no event = zero token cost.
-3. Wait silently. Don't reply on uneventful wakes. React ONLY when a Monitor event arrives.
-4. All GREEN/SKIPPED on watch exit: print `<<NODE_BOT_DONE>> ci passed`.
-5. Any FAILURE: fix → `git add -A && git commit -m "..." && git push origin HEAD` → relaunch bg watch + reattach Monitor.
-
-DO NOT: use Monitor in `--every` mode, use sleep-polling, or run `gh pr checks` without --watch + run_in_background."""
-            tmux_paste(session, watch_msg)
-            log(f"unclaw ci-watch handoff (Monitor-tool-based): {slug}")
+            tmux_kill(session)
+            log(f"unclaw PR open, session killed; review-poll handles CI/comments")
             continue
 
         if detect_escalate(pane):
@@ -1057,10 +994,10 @@ def tick() -> None:
         log(f"open PR cap ({open_prs})")
         return
 
-    # Concurrent cap (worker holds a slot through monitoring too)
+    # Concurrent cap
     with db() as c:
         running = c.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status IN ('running','monitoring')"
+            "SELECT COUNT(*) FROM tasks WHERE status='running'"
         ).fetchone()[0]
     if running >= CONCURRENT_CAP:
         log(f"concurrent cap ({running})")
