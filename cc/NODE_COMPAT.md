@@ -6,7 +6,7 @@ When new workstreams are added, give each its own `<NAME>.md` and link it from `
 
 ## Mission
 
-Pick a failing Node-compat test, spawn a worker that fixes the polyfill so that test passes, open a PR, shepherd it through review and CI to merge. Repeat. Operator-paced (no autonomous spawning quotas beyond 3 concurrent / 10 PRs daily).
+Pick a failing Node-compat test, spawn a worker that fixes the polyfill so that test passes, open a PR, shepherd it through review and CI to merge. Repeat. Operator-paced (caps: 3 concurrent workers, 10 PRs open at any time — merged/closed PRs free a slot).
 
 ## The fleet
 

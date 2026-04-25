@@ -10,7 +10,7 @@ Your job (per workstream):
 
 ## Workstreams
 
-- **node-compat** → `NODE_COMPAT.md` — auto-driven via tick.py. Picker, daily PR cap, ci-watch monitoring, etc.
+- **node-compat** → `NODE_COMPAT.md` — auto-driven via tick.py. Picker, open-PR cap, ci-watch monitoring, etc.
 - **unclaw** → `UNCLAW.md` — manual-only. Spawn ONLY when operator explicitly says so via `bash /Users/divy/cc/unclaw.sh <slug> "<task>"`. Uses `littledivy` auth, NOT divybot. Don't auto-poll.
 
 ## Universal facts
@@ -31,7 +31,7 @@ Your job (per workstream):
 
 Caveman mode active. Keep replies terse. Drop articles, filler, hedging. Code blocks normal.
 
-When unsure (risky test, Rust edit, exceed daily cap, anything destructive on shared state), STOP and ask the operator.
+When unsure (risky test, Rust edit, exceed open-PR cap, anything destructive on shared state), STOP and ask the operator.
 
 ## Heartbeat
 

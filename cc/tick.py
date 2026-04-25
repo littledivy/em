@@ -52,7 +52,7 @@ SOCKET_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-tmux-sockets"
 SOCKET = SOCKET_DIR / "deno-bot.sock"
 
 CONCURRENT_CAP = 3
-DAILY_PR_CAP = 10
+OPEN_PR_CAP = 10  # max PRs currently open (review/monitoring); merged/closed free a slot
 SPRAWL_FILES = 10
 SPRAWL_LOC = 400
 ATTEMPTS_CAP = 5
@@ -1044,14 +1044,12 @@ def tick() -> None:
     poll_review()
 
     # Daily PR cap
-    today = datetime.now().strftime("%Y-%m-%d")
     with db() as c:
-        pr_today = c.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status IN ('review','merged','monitoring') "
-            "AND date(updated_at,'unixepoch','localtime')=?", (today,),
+        open_prs = c.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status IN ('review','monitoring')"
         ).fetchone()[0]
-    if pr_today >= DAILY_PR_CAP:
-        log(f"daily PR cap ({pr_today})")
+    if open_prs >= OPEN_PR_CAP:
+        log(f"open PR cap ({open_prs})")
         return
 
     # Concurrent cap (worker holds a slot through monitoring too)
