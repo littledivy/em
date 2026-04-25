@@ -354,7 +354,8 @@ def trust_worktree(wt: Path) -> None:
 def fetch_pr_signal(pr_num: str, repo: str) -> tuple[str, dict, list]:
     """Return (hash, pr_data, inline_comments) for change detection."""
     pr_data = gh_json(
-        "pr", "view", pr_num, "--json", "state,statusCheckRollup,reviews,comments",
+        "pr", "view", pr_num, "--json",
+        "state,statusCheckRollup,reviews,comments,mergeable,mergeStateStatus",
         repo=repo,
     ) or {}
     inline_out = run("gh", "api", f"repos/{repo}/pulls/{pr_num}/comments")
@@ -362,6 +363,8 @@ def fetch_pr_signal(pr_num: str, repo: str) -> tuple[str, dict, list]:
 
     sig = {
         "state": pr_data.get("state"),
+        "mergeable": pr_data.get("mergeable"),
+        "mergeStateStatus": pr_data.get("mergeStateStatus"),
         "ci_fail": [
             c["name"] for c in pr_data.get("statusCheckRollup") or []
             if c.get("conclusion") == "FAILURE"
@@ -394,6 +397,7 @@ def pr_counts(pr_data: dict, inline: list) -> dict[str, int]:
         "comments": sum(1 for c in pr_data.get("comments") or [] if not BOT_LOGINS_RE.search(c["author"]["login"])),
         "reviews": sum(1 for r in pr_data.get("reviews") or [] if not BOT_LOGINS_RE.search(r["author"]["login"])),
         "inline": sum(1 for c in inline if not BOT_LOGINS_RE.search(c["user"]["login"])),
+        "conflict": 1 if pr_data.get("mergeable") == "CONFLICTING" or pr_data.get("mergeStateStatus") == "DIRTY" else 0,
     }
 
 
@@ -759,7 +763,7 @@ def poll_review() -> None:
         pr_url = row["pr_url"]
         repo = row["repo"]
         pr_num = pr_url.rsplit("/", 1)[-1]
-        pr_data = gh_json("pr", "view", pr_num, "--json", "state,statusCheckRollup,reviews,comments", repo=repo) or {}
+        pr_data = gh_json("pr", "view", pr_num, "--json", "state,statusCheckRollup,reviews,comments,mergeable,mergeStateStatus", repo=repo) or {}
         state = pr_data.get("state")
         if state == "MERGED":
             task_update(task, status="merged")
@@ -785,13 +789,13 @@ def poll_review() -> None:
         task_update(task, last_pr_hash=h)
 
         # Baseline: silent only if nothing actionable.
-        if not prev_hash and counts["fail"] == 0 and counts["comments"] == 0 and counts["reviews"] == 0 and counts["inline"] == 0:
+        if not prev_hash and counts["fail"] == 0 and counts["comments"] == 0 and counts["reviews"] == 0 and counts["inline"] == 0 and not counts.get("conflict"):
             log(f"baseline: {task} (clean)")
             continue
 
-        # Skip re-feedback if worker already verdict'd no-action AND no NEW human signals.
+        # Skip re-feedback if worker already verdict'd no-action AND no NEW human/conflict signals.
         last_err = task_get(task).get("last_error") or ""
-        if last_err.startswith("no-action:") and counts["comments"] == 0 and counts["reviews"] == 0 and counts["inline"] == 0:
+        if last_err.startswith("no-action:") and counts["comments"] == 0 and counts["reviews"] == 0 and counts["inline"] == 0 and not counts.get("conflict"):
             log(f"no-action acknowledged, skipping feedback: {task}")
             continue
 
@@ -822,16 +826,25 @@ def paste_update_to_live_worker(task: str, repo: str, pr_num: str, counts: dict[
         log(f"live worker session gone for {task}; bouncing to review for next-tick respawn")
         task_update(task, status="review", last_pr_hash="")
         return
+    push_remote = "origin" if task.startswith("unclaw:") else "bot"
+    conflict_note = ""
+    if counts.get("conflict"):
+        conflict_note = (
+            f"\n⚠️ MERGE CONFLICT — rebase: `git fetch origin && git rebase origin/main` "
+            f"(resolve in editor, `git rebase --continue`), then `git push {push_remote} HEAD --force-with-lease`."
+        )
     msg = (
         f"NEW activity on PR #{pr_num} (https://github.com/{repo}/pull/{pr_num}) while you were working. "
         f"Counts now: {counts['fail']} failing checks, {counts['comments']} issue comments, "
-        f"{counts['reviews']} reviews, {counts['inline']} inline review comments. "
+        f"{counts['reviews']} reviews, {counts['inline']} inline review comments"
+        f"{', MERGE CONFLICT' if counts.get('conflict') else ''}. "
         f"Investigate alongside what you're already doing:\n"
         f"- gh pr view {pr_num} --repo {repo} --comments\n"
         f"- gh pr checks {pr_num} --repo {repo}\n"
         f"- gh api repos/{repo}/pulls/{pr_num}/comments\n"
         f"Address the new feedback, commit, and push. If a comment requests a fundamental scope change "
         f"or asks whether the PR is worth landing, print `<<NODE_BOT_ESCALATE>> reviewer questioning PR — operator decides`."
+        f"{conflict_note}"
     )
     tmux_paste(session, msg)
     log(f"pasted update to live worker: {task} (#{pr_num}) — fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}")
@@ -872,6 +885,18 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         time.sleep(3)
         tmux_clear_history(session)
 
+    push_remote = "origin" if task.startswith("unclaw:") else "bot"
+    conflict_block = ""
+    if counts.get("conflict"):
+        conflict_block = (
+            f"\n\n⚠️ MERGE CONFLICT against base branch. Resolve first:\n"
+            f"  git fetch origin\n"
+            f"  git rebase origin/main      # or `git merge origin/main`\n"
+            f"  # resolve conflicts in editor\n"
+            f"  git add -A && git rebase --continue\n"
+            f"  git push {push_remote} HEAD --force-with-lease\n"
+            f"After conflicts are resolved AND any failing checks are fixed, signal done."
+        )
     fb = (
         f"PR #{pr_num} (https://github.com/{repo}/pull/{pr_num}) has new activity. Investigate and address EVERYTHING:\n"
         f"- gh pr view {pr_num} --repo {repo} --comments\n"
@@ -879,9 +904,11 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         f"- For failing checks: gh run view --log-failed --repo {repo} <run-id>\n"
         f"- Inline review threads: gh api repos/{repo}/pulls/{pr_num}/comments\n"
         f"Counts now: {counts['fail']} failing checks, {counts['comments']} issue comments, "
-        f"{counts['reviews']} reviews, {counts['inline']} inline review comments.\n"
+        f"{counts['reviews']} reviews, {counts['inline']} inline review comments"
+        f"{', MERGE CONFLICT' if counts.get('conflict') else ''}.\n"
         f"Address every reviewer comment, fix every failing check. {verify} "
         f"When everything is addressed, print exactly: `<<NODE_BOT_DONE>> <one-line summary>`."
+        f"{conflict_block}"
     )
     tmux_paste(session, fb)
     with db() as c:
