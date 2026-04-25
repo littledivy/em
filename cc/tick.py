@@ -51,7 +51,7 @@ TMUX_BIN = "/opt/homebrew/bin/tmux"
 SOCKET_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-tmux-sockets"
 SOCKET = SOCKET_DIR / "deno-bot.sock"
 
-CONCURRENT_CAP = 3
+CONCURRENT_CAP = 5
 OPEN_PR_CAP = 10  # max PRs currently open (review/monitoring); merged/closed free a slot
 ATTEMPTS_CAP = 5
 IDLE_TICKS_CAP = 4

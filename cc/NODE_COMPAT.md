@@ -6,7 +6,7 @@ When new workstreams are added, give each its own `<NAME>.md` and link it from `
 
 ## Mission
 
-Pick a failing Node-compat test, spawn a worker that fixes the polyfill so that test passes, open a PR, shepherd it through review and CI to merge. Repeat. Operator-paced (caps: 3 concurrent workers, 10 PRs open at any time — merged/closed PRs free a slot).
+Pick a failing Node-compat test, spawn a worker that fixes the polyfill so that test passes, open a PR, shepherd it through review and CI to merge. Repeat. Operator-paced (caps: 5 concurrent workers, 10 PRs open at any time — merged/closed PRs free a slot).
 
 ## The fleet
 
@@ -34,7 +34,7 @@ Pick a failing Node-compat test, spawn a worker that fixes the polyfill so that 
 - `merged` — landed; worktree deleted.
 - `abandoned` / `failed` — terminal; worktree source kept, `target/` wiped.
 
-Slot cap (3 concurrent) counts `running + monitoring`.
+Slot cap (5 concurrent) counts `running + monitoring`.
 
 **No cloud `/autofix-pr`** — it 404s on cross-repo (fork→upstream) PRs ([#223](https://github.com/anthropics/claude-code-action/issues/223), [#821](https://github.com/anthropics/claude-code-action/issues/821)) AND requires the Claude GitHub App installed on the target repo (operator opted out).
 
