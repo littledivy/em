@@ -1363,30 +1363,40 @@ def tick() -> None:
     for h in HOSTS:
         if not h.sccache:
             continue
+        # Skip cap=0 hosts (disabled) — no need to reach unreachable VMs to
+        # push env they won't use; one bad ssh would crash the whole tick.
+        if h.capacity == 0:
+            continue
         sccache_bin = SCCACHE_BIN if h.is_local else "sccache"
         if h.is_local and not Path(SCCACHE_BIN).exists():
             continue
-        t("setenv", "-g", "RUSTC_WRAPPER", sccache_bin, host=h)
-        if shared_env:
-            for k, v in shared_env.items():
-                t("setenv", "-g", k, v, host=h)
-        else:
-            # legacy local-disk fallback
-            if h.is_local:
-                Path(h.sccache_dir.replace("~", str(Path.home()))).mkdir(parents=True, exist_ok=True)
+        try:
+            t("setenv", "-g", "RUSTC_WRAPPER", sccache_bin, host=h)
+            if shared_env:
+                for k, v in shared_env.items():
+                    t("setenv", "-g", k, v, host=h)
             else:
-                host_run(h, "mkdir", "-p", h.sccache_dir)
-            t("setenv", "-g", "SCCACHE_DIR", h.sccache_dir, host=h)
-            t("setenv", "-g", "SCCACHE_CACHE_SIZE", h.sccache_cache_size, host=h)
+                # legacy local-disk fallback
+                if h.is_local:
+                    Path(h.sccache_dir.replace("~", str(Path.home()))).mkdir(parents=True, exist_ok=True)
+                else:
+                    host_run(h, "mkdir", "-p", h.sccache_dir)
+                t("setenv", "-g", "SCCACHE_DIR", h.sccache_dir, host=h)
+                t("setenv", "-g", "SCCACHE_CACHE_SIZE", h.sccache_cache_size, host=h)
+        except Exception as e:
+            log(f"sccache env push failed for {h.name}: {e}; skipping host this tick")
 
     # Remote VMs are unclaw-wrapped (TLS-MITM). cargo's TLS to crates.io
     # gets corrupted (TLS EOF mid-download → rustc ICE on truncated dep).
     # Force CARGO_NET_OFFLINE=true so builds hit the local registry cache
     # populated by `cargo fetch` at bootstrap. Localhost stays online.
     for h in HOSTS:
-        if h.is_local:
+        if h.is_local or h.capacity == 0:
             continue
-        t("setenv", "-g", "CARGO_NET_OFFLINE", "true", host=h)
+        try:
+            t("setenv", "-g", "CARGO_NET_OFFLINE", "true", host=h)
+        except Exception as e:
+            log(f"CARGO_NET_OFFLINE push failed for {h.name}: {e}")
 
     if HALT.exists():
         log("halted")
