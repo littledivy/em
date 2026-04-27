@@ -276,15 +276,25 @@ def gh_json(*args: str, repo: str = UPSTREAM_REPO) -> dict | list | None:
 
 
 def host_run(host: Host, *cmd: str, **kw) -> subprocess.CompletedProcess[str]:
-    """Run a command on `host`. Localhost = direct exec. Remote = ssh-wrapped
-    with the cmd joined as a single shell string (so quoting works the way you
-    expect for `tmux send-keys -- '<line>'`)."""
+    """Run a command on `host`. Localhost = direct exec. Remote = goes through
+    the persistent HostShell (one long-lived ssh+bash per host) so per-command
+    overhead is ~50ms instead of ~4s/channel-open."""
     if host.is_local:
         return run(*cmd, **kw)
-    import shlex
-    quoted = " ".join(shlex.quote(c) for c in cmd)
-    return run("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-               "-p", str(host.port), host.ssh_target, quoted, **kw)
+    from host_shell import get_shell
+    cwd = kw.get("cwd")
+    env = kw.get("env")
+    timeout = kw.get("timeout") or 300
+    cp = f"/tmp/ssh-cm-{host.name}-{host.port}"  # mux reuses TCP across one-offs too
+    sh = get_shell(host.name, host.ssh_target, port=host.port, control_path=cp)
+    res = sh.run(list(cmd),
+                 cwd=str(cwd) if cwd else None,
+                 env=env,
+                 timeout=float(timeout))
+    return subprocess.CompletedProcess(
+        args=list(cmd), returncode=res.returncode,
+        stdout=res.stdout, stderr=res.stderr,
+    )
 
 
 def t(*args: str, host: Host = LOCAL_HOST, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -310,9 +320,13 @@ def tmux_capture(session: str, lines: int = 500, host: Host = LOCAL_HOST) -> str
 
 def tmux_paste(session: str, text: str, then_enter: bool = True, host: Host = LOCAL_HOST) -> None:
     t("set-buffer", "-b", "msg", "--", text, host=host)
-    t("paste-buffer", "-b", "msg", "-t", f"{session}:0.0", host=host)
+    # `-p` emits bracketed-paste sequences so Ink-based TUIs (claude/codex)
+    # see this as a paste, render the [Pasted Content N chars] placeholder,
+    # and treat the subsequent Enter as a submit instead of folding it into
+    # the input buffer.
+    t("paste-buffer", "-p", "-b", "msg", "-t", f"{session}:0.0", host=host)
     if then_enter:
-        time.sleep(1)
+        time.sleep(1.5)  # let Ink's paste-debounce settle before commit Enter
         t("send-keys", "-t", f"{session}:0.0", "Enter", host=host)
 
 
@@ -511,18 +525,15 @@ def git(*args: str, cwd: str | Path, env: dict | None = None,
         host: Host = LOCAL_HOST) -> subprocess.CompletedProcess[str]:
     if host.is_local:
         return run("git", *args, cwd=cwd, env=env)
-    # Remote: use `git -C <cwd>` so the ssh shell doesn't need to chdir.
-    # Env-var prefix turns into a shell-prefix, which host_run quote-handles.
-    env_prefix: list[str] = []
+    # Remote: route through the persistent shell. Pass cwd + filtered env via
+    # HostShell's structured args (no manual quoting required).
+    forwarded: dict[str, str] = {}
     if env:
-        # Only forward GIT_* + GH_TOKEN; everything else inherits remote shell.
         for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
                   "GIT_COMMITTER_EMAIL", "GH_TOKEN"):
             if k in env:
-                env_prefix += [f"{k}={env[k]}"]
-    cmd = ["env", *env_prefix, "git", "-C", str(cwd), *args] if env_prefix \
-          else ["git", "-C", str(cwd), *args]
-    return host_run(host, *cmd)
+                forwarded[k] = env[k]
+    return host_run(host, "git", *args, cwd=str(cwd), env=forwarded or None)
 
 
 def git_env(author: str, email: str | None = None) -> dict[str, str]:
