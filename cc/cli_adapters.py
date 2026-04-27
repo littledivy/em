@@ -28,6 +28,12 @@ class CliAdapter:
     def supports_remote_control(self) -> bool:
         return False
 
+    def pre_prompt_keys(self) -> list[str]:
+        """Lines/keys to send between launch and prompt-paste — answers any
+        startup prompts (e.g. codex's 'Do you trust this directory?'). Default
+        none; subclasses override."""
+        return []
+
 
 class ClaudeAdapter(CliAdapter):
     def launch(self, sid: str, task: str) -> str:
@@ -51,10 +57,15 @@ class CodexAdapter(CliAdapter):
     that worktree's cwd). sid is unused but stored for db consistency."""
 
     def launch(self, sid: str, task: str) -> str:
-        return f"{self.bin} --dangerously-bypass-approvals-and-sandbox"
+        return f"{self.bin} --model gpt-5.4 --dangerously-bypass-approvals-and-sandbox"
 
     def resume(self, sid: str, task: str) -> str | None:
-        return f"{self.bin} resume --last --dangerously-bypass-approvals-and-sandbox"
+        return f"{self.bin} resume --last --model gpt-5.4 --dangerously-bypass-approvals-and-sandbox"
+
+    def pre_prompt_keys(self) -> list[str]:
+        # Codex shows "Do you trust this directory?" on first start in a new dir
+        # (worker worktrees are always fresh). Answer "1" (Yes, continue).
+        return ["1"]
 
 
 class GeminiAdapter(CliAdapter):
