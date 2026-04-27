@@ -52,7 +52,7 @@ SOCKET_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-tmux-sockets"
 SOCKET = SOCKET_DIR / "deno-bot.sock"
 
 CONCURRENT_CAP = 5
-OPEN_PR_CAP = 10  # max PRs currently open (review/monitoring); merged/closed free a slot
+OPEN_PR_CAP = 15  # max PRs currently open (review/monitoring); merged/closed free a slot
 ATTEMPTS_CAP = 5
 IDLE_TICKS_CAP = 4
 
@@ -85,8 +85,8 @@ RE_ESCALATE = re.compile(
     r"depends|blocked|escalate|gives up|stuck)"
 )
 RE_NO_ACTION = re.compile(
-    r"(?:^|[^`])<>.*"
-    r"(?:already|flaky|unrelated|no actionable|no action|nothing to fix|moot)"
+    r"(?:^|[^`])(?:<>|<<NODE_BOT_DONE>>).*"
+    r"(?:already|flaky|unrelated|no actionable|no action|nothing to fix|moot|no code change)"
 )
 RE_CI_PASSED = re.compile(
     r"(?:^|[^`])(?:<<NODE_BOT_DONE>>|<>) (?:ci|all|green|passed|done)", re.M
@@ -181,6 +181,18 @@ def tmux_send_line(session: str, line: str) -> None:
 
 def tmux_clear_history(session: str) -> None:
     t("clear-history", "-t", f"{session}:0.0")
+
+
+def ensure_remote_control(session: str, attempts: int = 4) -> bool:
+    """Send /remote-control and verify it took. Slash commands silently drop
+    if the Claude TUI isn't ready yet, so retry until 'Remote Control active'
+    shows in the pane (or attempts run out)."""
+    for i in range(attempts):
+        if "Remote Control active" in tmux_capture(session, lines=80):
+            return True
+        tmux_send_line(session, "/remote-control")
+        time.sleep(3 + i * 2)
+    return "Remote Control active" in tmux_capture(session, lines=80)
 
 
 def tmux_list_unc_sessions() -> list[str]:
@@ -294,8 +306,9 @@ def detect_feedback_done(pane: str) -> bool:
     return bool(RE_FEEDBACK_DONE.search("\n".join(pane.splitlines()[-80:])))
 
 
-def extract_title(pane: str, max_len: int = 70) -> str:
-    """Return the latest sentinel summary line from pane, sanitized."""
+def extract_title(pane: str, max_len: int = 100) -> str:
+    """Return the latest sentinel summary line from pane, sanitized.
+    Truncates at word boundary if over max_len."""
     last_match = None
     for line in pane.splitlines()[-80:]:
         m = RE_DONE_TITLE.search(line)
@@ -306,7 +319,12 @@ def extract_title(pane: str, max_len: int = 70) -> str:
     cleaned = re.sub(r"[^\x09\x0a\x0d\x20-\x7e]", "", last_match).strip().rstrip(".")
     if len(cleaned) <= 8:
         return ""
-    return cleaned[:max_len]
+    if len(cleaned) <= max_len:
+        return cleaned
+    # Truncate at last word boundary before max_len
+    cut = cleaned[:max_len]
+    sp = cut.rfind(" ")
+    return cut[:sp] if sp > max_len // 2 else cut
 
 
 def extract_body(pane: str, max_len: int = 4000) -> str:
@@ -349,6 +367,39 @@ def git_env(author: str, email: str | None = None) -> dict[str, str]:
 
 def trust_worktree(wt: Path) -> None:
     run("bash", "/Users/divy/cc/trust.sh", str(wt))
+
+
+def install_trailer_hook(wt: Path) -> None:
+    """Per-worktree git hooks + exclude rules for the worker."""
+    git_dir = run("git", "-C", str(wt), "rev-parse", "--git-dir").stdout.strip()
+    gd = Path(git_dir) if Path(git_dir).is_absolute() else (wt / git_dir)
+    hooks = gd / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    # Auto-append Co-authored-by trailer to every commit.
+    (hooks / "prepare-commit-msg").write_text(
+        "#!/bin/sh\n"
+        "MSG_FILE=\"$1\"\n"
+        "TRAILER='Co-authored-by: Divy Srivastava <me@littledivy.com>'\n"
+        "grep -qF \"$TRAILER\" \"$MSG_FILE\" || printf '\\n%s\\n' \"$TRAILER\" >> \"$MSG_FILE\"\n"
+    )
+    (hooks / "prepare-commit-msg").chmod(0o755)
+    # Pre-commit: refuse to commit anything under .claude/
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\n"
+        "if git diff --cached --name-only | grep -qE '^\\.claude(/|$)'; then\n"
+        "  echo 'refusing to commit .claude/ paths — unstaging' >&2\n"
+        "  git reset HEAD -- .claude 2>/dev/null\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    (hooks / "pre-commit").chmod(0o755)
+    # Local exclude (not committed) so .claude/ doesn't appear in `git status`.
+    info = gd / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    excl = info / "exclude"
+    existing = excl.read_text() if excl.exists() else ""
+    if ".claude/" not in existing:
+        excl.write_text(existing.rstrip() + "\n.claude/\n")
 
 
 def fetch_pr_signal(pr_num: str, repo: str) -> tuple[str, dict, list]:
@@ -434,7 +485,10 @@ def post_worker(task: str) -> None:
 
     # Commit if there's anything to commit (no-op otherwise)
     git("add", "-A", cwd=wt)
-    commit_msg = f"{title}\n\nEnables tests/node_compat/runner/suite/test/parallel/{task}.js"
+    commit_msg = (
+        f"{title}\n\nEnables tests/node_compat/runner/suite/test/parallel/{task}.js\n"
+        f"\nCo-authored-by: Divy Srivastava <me@littledivy.com>"
+    )
     git("commit", "-m", commit_msg, cwd=wt, env=env)
 
     # Ensure bot remote exists
@@ -461,6 +515,7 @@ def post_worker(task: str) -> None:
 
     task_update(task, status="review", pr_url=pr_url, last_pr_hash="")
     tmux_kill(session)
+    shutil.rmtree(wt / "target", ignore_errors=True)
     log(f"PR opened, session killed; review-poll handles CI/comments/conflicts: {task}")
 
 
@@ -492,12 +547,14 @@ def poll_running() -> None:
             shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             continue
         pane = tmux_capture(session)
+        # No-action takes priority over DONE — worker may say "<<NODE_BOT_DONE>> ... flaky/unrelated/no code change",
+        # which semantically means "nothing to do" not "ship this".
+        if detect_no_action(pane):
+            handle_no_action(task)
+            continue
         if detect_done(pane):
             log(f"DONE: {task}")
             post_worker(task)
-            continue
-        if detect_no_action(pane):
-            handle_no_action(task)
             continue
         if detect_escalate(pane):
             log(f"ESCALATE: {task}")
@@ -554,8 +611,10 @@ def handle_no_action(task: str) -> None:
         if r.returncode != 0 and r.stderr:
             log(r.stderr.strip().splitlines()[0])
 
-    # First no-action verdict on this PR → ping operator with worker's reasoning.
-    if not prev_err.startswith("no-action:"):
+    # First no-action verdict on this PR → ping operator IF there are actual failing checks.
+    # If PR is already green, no ping needed — operator can just merge.
+    failing_checks = [c for c in (sc.get("statusCheckRollup") or []) if c.get("conclusion") == "FAILURE"]
+    if not prev_err.startswith("no-action:") and failing_checks:
         pane = tmux_capture(session)
         recent = "\n".join(pane.splitlines()[-20:])
         m = re.search(r"<>(.*)", recent)
@@ -570,6 +629,8 @@ def handle_no_action(task: str) -> None:
         )
         run("gh", "pr", "comment", pr_num, "--repo", repo, "--body", body)
         log(f"pinged @littledivy on {repo} #{pr_num}")
+    elif not failing_checks:
+        log(f"no-action: {task} all-green, no ping needed — ready for merge")
 
     # Compute current hash and store so review-poll stays silent.
     h, _, _ = fetch_pr_signal(pr_num, repo)
@@ -653,7 +714,8 @@ def poll_unclaw() -> None:
 
             env = git_env(UNCLAW_AUTH_USER)
             env["GH_TOKEN"] = little_token
-            git("commit", "-am", title, cwd=wt, env=env)
+            unc_msg = f"{title}\n\nCo-authored-by: Divy Srivastava <me@littledivy.com>"
+            git("commit", "-am", unc_msg, cwd=wt, env=env)
             git("push", "origin", branch, cwd=wt, env=env)
 
             out = run(
@@ -742,13 +804,8 @@ def poll_review() -> None:
             paste_update_to_live_worker(task, repo, pr_num, counts)
             continue
 
-        # status == 'review' — respawn worker.
-        attempts = task_get(task).get("attempts") or 0
-        if attempts >= ATTEMPTS_CAP:
-            task_update(task, status="abandoned", last_error="attempts exhausted")
-            log(f"exhausted: {task}")
-            continue
-
+        # status == 'review' — respawn worker. PR is still OPEN here (review-poll only
+        # iterates open PRs); operator policy: never abandon while PR is open.
         respawn_worker_for_feedback(task, repo, pr_num, counts)
 
 
@@ -797,7 +854,9 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         env_prefix = f"GH_TOKEN=$(gh auth token --user {UNCLAW_AUTH_USER}) "
         verify = (
             "Verify the fix locally (run the repo's tests/lints). "
-            "Commit AND push immediately: `git add -A && git commit -m \"<msg>\" && git push origin HEAD`."
+            "Commit AND push immediately. Commit MUST include trailer "
+            "`Co-authored-by: Divy Srivastava <me@littledivy.com>` (use HEREDOC: "
+            "`git add -A && git commit -m \"$(printf '%s\\n\\nCo-authored-by: Divy Srivastava <me@littledivy.com>' '<msg>')\" && git push origin HEAD`)."
         )
     else:
         wt = WT_BASE / task
@@ -806,7 +865,9 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         env_prefix = ""
         verify = (
             f"Verify locally with `nix develop -c cargo test --test node_compat -- {task}`. "
-            "Commit AND push immediately: `git add -A && git commit -m \"<msg>\" && git push bot HEAD`."
+            "Commit AND push immediately. Commit MUST include trailer "
+            "`Co-authored-by: Divy Srivastava <me@littledivy.com>` (use HEREDOC: "
+            "`git add -A && git commit -m \"$(printf '%s\\n\\nCo-authored-by: Divy Srivastava <me@littledivy.com>' '<msg>')\" && git push bot HEAD`)."
         )
 
     if not tmux_has_session(session):
@@ -814,12 +875,12 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
             log(f"worktree gone, can't resume {task}")
             return
         trust_worktree(wt)
+        install_trailer_hook(wt)
         t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", str(wt))
         cmd = f"{env_prefix}{CLAUDE_BIN} --continue --permission-mode bypassPermissions -n '{worker_name}'"
         tmux_send_line(session, cmd)
         time.sleep(6)
-        tmux_send_line(session, "/remote-control")
-        time.sleep(3)
+        ensure_remote_control(session)
         tmux_clear_history(session)
 
     push_remote = "origin" if task.startswith("unclaw:") else "bot"
@@ -943,13 +1004,13 @@ def spawn_worker(task: str) -> None:
         run("git", "-C", str(DENO), "worktree", "add", str(wt), branch)
     git("config", "user.name", BOT_USER, cwd=wt)
     git("config", "user.email", f"{BOT_USER}@users.noreply.github.com", cwd=wt)
+    install_trailer_hook(wt)
     tmux_kill(session)
     trust_worktree(wt)
     t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", str(wt))
     tmux_send_line(session, f"{CLAUDE_BIN} --permission-mode bypassPermissions -n 'deno-bot:{task}'")
     time.sleep(8)
-    tmux_send_line(session, "/remote-control")
-    time.sleep(3)
+    ensure_remote_control(session)
 
     prompt_template = (Path(__file__).parent / "prompt.md").read_text()
     file_hint = re.sub(r"^test-([a-z0-9]*).*", r"\1", task)
@@ -984,6 +1045,7 @@ def tick() -> None:
     poll_monitoring()
     poll_unclaw()
     poll_review()
+    deliver_inbox()  # second pass: catches inbox msgs whose worker just got respawned
 
     # Daily PR cap
     with db() as c:

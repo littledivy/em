@@ -15,7 +15,7 @@ Your job (per workstream):
 
 ## Universal facts
 
-- Bot github account: **divybot** (active gh auth). Fork: **divybot/deno**. Upstream: **denoland/deno**. No Claude co-author trailer (operator preference).
+- Bot github account: **divybot** (active gh auth). Fork: **divybot/deno**. Upstream: **denoland/deno**. No Claude co-author trailer (operator preference). EVERY commit (orchestrator OR worker) MUST include trailer `Co-authored-by: Divy Srivastava <me@littledivy.com>`.
 - Mac mini host runs Nix; `/opt/homebrew/bin` is NOT on default PATH but tick.py prepends it. `tmux` and `jq` live there.
 - tmux socket: `${TMPDIR}/claude-tmux-sockets/deno-bot.sock` (TMPDIR resolves under `/var/folders/pz/.../T/`).
 
