@@ -48,7 +48,7 @@ name     = "bot0"
 host     = "vm.littledivy.com"
 user     = "bot0-linux"
 port     = 22
-capacity = 3
+capacity = 1
 clis     = ["codex"]
 wt_base  = "~/src/deno-wt"
 deno_src = "~/src/deno"
@@ -58,12 +58,14 @@ sccache_dir = "~/.cache/sccache"
 sccache_cache_size = "60G"
 unclaw_wrap = true
 
+# bot1: capacity=0 until `codex login` is run on the VM (~/.codex/ is empty,
+# so the codex binary just exits and the prompt falls into bash).
 [[vm]]
 name     = "bot1"
 host     = "vm.littledivy.com"
 user     = "bot1-linux"
 port     = 22
-capacity = 3
+capacity = 0
 clis     = ["codex"]
 wt_base  = "~/src/deno-wt"
 deno_src = "~/src/deno"
