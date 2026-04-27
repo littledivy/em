@@ -147,11 +147,33 @@ class HostShell:
             f"{self._strip_ansi(_tmux('capture-pane', '-t', self.session, '-p', '-S', '-50').stdout)[-300:]!r}"
         )
 
+    def _pane_running_ssh(self) -> bool:
+        """The pane should have `ssh` as the foreground process. If ssh died
+        (network drop, server kicked us, ServerAlive timeout), the pane's
+        current_command falls back to `bash` — that's our cue to respawn the
+        whole session instead of typing into a now-dead session."""
+        res = _tmux("list-panes", "-t", self.session,
+                    "-F", "#{pane_dead} #{pane_current_command}")
+        if res.returncode != 0:
+            return False
+        first = res.stdout.strip().split("\n")[0] if res.stdout.strip() else ""
+        parts = first.split(None, 1)
+        if not parts or parts[0] == "1":  # pane_dead=1
+            return False
+        cmd = parts[1] if len(parts) > 1 else ""
+        return cmd == "ssh"
+
     def _ensure_alive(self) -> None:
-        if self._alive and _tmux("has-session", "-t", self.session).returncode == 0:
-            return
-        self._alive = False
-        self._spawn_session()
+        if self._alive:
+            if _tmux("has-session", "-t", self.session).returncode != 0:
+                self._alive = False
+            elif not self._pane_running_ssh():
+                # ssh died (network blip, ServerAliveCountMax exceeded). Kill
+                # the whole tmux session so we get a clean pane on respawn.
+                _tmux("kill-session", "-t", self.session, capture=True)
+                self._alive = False
+        if not self._alive:
+            self._spawn_session()
 
     def close(self) -> None:
         with self._lock:
@@ -225,6 +247,11 @@ class HostShell:
                     err = err[:-1]
                 return out, err, rc
             time.sleep(0.1)
+        # Timed out waiting for sentinel — pane is wedged (ssh stalled,
+        # remote bash hung, etc.). Nuke the session so next call respawns
+        # from clean state instead of typing into the dead pane.
+        _tmux("kill-session", "-t", self.session, capture=True)
+        self._alive = False
         raise ShellError(
             f"command timed out after {timeout}s; last 400 chars of pane: {last_pane[-400:]!r}"
         )

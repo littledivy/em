@@ -1377,28 +1377,36 @@ def tick() -> None:
     poll_review()
     deliver_inbox()  # second pass: catches inbox msgs whose worker just got respawned
 
-    # Daily PR cap
-    with db() as c:
-        open_prs = c.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status IN ('review','monitoring')"
-        ).fetchone()[0]
-    if open_prs >= OPEN_PR_CAP:
-        log(f"open PR cap ({open_prs})")
-        return
-
-    # Per-host capacity check (replaces the old global CONCURRENT_CAP).
-    counts = _running_counts_per_host()
+    # Spawn until every host is full, the open-PR cap is hit, or queue dries.
+    # Operator preference: keep capacity always saturated when there's work.
     total_capacity = sum(h.capacity for h in HOSTS)
-    total_running = sum(counts.values())
-    if total_running >= total_capacity:
-        log(f"all hosts full ({total_running}/{total_capacity})")
-        return
-
-    task = pick_task()
-    if not task:
-        log("no fresh tasks")
-        return
-    spawn_worker(task)
+    while True:
+        with db() as c:
+            open_prs = c.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status IN ('review','monitoring')"
+            ).fetchone()[0]
+        if open_prs >= OPEN_PR_CAP:
+            log(f"open PR cap ({open_prs})")
+            break
+        counts = _running_counts_per_host()
+        total_running = sum(counts.values())
+        if total_running >= total_capacity:
+            log(f"all hosts full ({total_running}/{total_capacity})")
+            break
+        task = pick_task()
+        if not task:
+            log("no fresh tasks")
+            break
+        try:
+            spawn_worker(task)
+        except Exception as e:
+            # A host's ssh died mid-spawn or some other transient error. Don't
+            # crash the whole tick — log + continue. The task was already
+            # popped from the queue; re-queue it so we don't lose it.
+            log(f"spawn failed for {task}: {e}; re-queueing")
+            with QUEUE.open("a") as f:
+                f.write(task + "\n")
+            break  # bail this tick to avoid hammering a broken host
 
 
 if __name__ == "__main__":
