@@ -1343,22 +1343,50 @@ def tick() -> None:
     INBOX.mkdir(parents=True, exist_ok=True)
     WT_BASE.mkdir(parents=True, exist_ok=True)
 
-    # Per-host sccache: configure RUSTC_WRAPPER on each host's tmux server.
-    # Existing sessions on a server won't pick it up until they respawn.
+    # Per-host sccache: every host shares one S3-style cache (MinIO at
+    # sccache.littledivy.com). Creds live in ~/.deno-bot/sccache.env (not
+    # committed) and are pushed to each host's tmux server. If the file is
+    # missing we fall back to the old local-disk cache.
+    sccache_env_path = ROOT / "sccache.env"
+    shared_env: dict[str, str] = {}
+    if sccache_env_path.exists():
+        for line in sccache_env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" in line:
+                k, v = line.split("=", 1)
+                shared_env[k.strip()] = v.strip().strip('"').strip("'")
+
     for h in HOSTS:
         if not h.sccache:
             continue
-        if h.is_local:
-            Path(h.sccache_dir.replace("~", str(Path.home()))).mkdir(parents=True, exist_ok=True)
-        else:
-            host_run(h, "mkdir", "-p", h.sccache_dir)
-        # Resolve sccache binary on the host. Local: hard path; remote: assume on PATH.
         sccache_bin = SCCACHE_BIN if h.is_local else "sccache"
         if h.is_local and not Path(SCCACHE_BIN).exists():
             continue
         t("setenv", "-g", "RUSTC_WRAPPER", sccache_bin, host=h)
-        t("setenv", "-g", "SCCACHE_DIR", h.sccache_dir, host=h)
-        t("setenv", "-g", "SCCACHE_CACHE_SIZE", h.sccache_cache_size, host=h)
+        if shared_env:
+            for k, v in shared_env.items():
+                t("setenv", "-g", k, v, host=h)
+        else:
+            # legacy local-disk fallback
+            if h.is_local:
+                Path(h.sccache_dir.replace("~", str(Path.home()))).mkdir(parents=True, exist_ok=True)
+            else:
+                host_run(h, "mkdir", "-p", h.sccache_dir)
+            t("setenv", "-g", "SCCACHE_DIR", h.sccache_dir, host=h)
+            t("setenv", "-g", "SCCACHE_CACHE_SIZE", h.sccache_cache_size, host=h)
+
+    # Remote VMs are unclaw-wrapped (TLS-MITM). cargo's TLS to crates.io
+    # gets corrupted (TLS EOF mid-download → rustc ICE on truncated dep).
+    # Force CARGO_NET_OFFLINE=true so builds hit the local registry cache
+    # populated by `cargo fetch` at bootstrap. Localhost stays online.
+    for h in HOSTS:
+        if h.is_local:
+            continue
+        t("setenv", "-g", "CARGO_NET_OFFLINE", "true", host=h)
 
     if HALT.exists():
         log("halted")
