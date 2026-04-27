@@ -57,10 +57,10 @@ class CodexAdapter(CliAdapter):
     that worktree's cwd). sid is unused but stored for db consistency."""
 
     def launch(self, sid: str, task: str) -> str:
-        return f"{self.bin} --model gpt-5.4 --dangerously-bypass-approvals-and-sandbox"
+        return f'{self.bin} -c model="gpt-5.4" --dangerously-bypass-approvals-and-sandbox'
 
     def resume(self, sid: str, task: str) -> str | None:
-        return f"{self.bin} resume --last --model gpt-5.4 --dangerously-bypass-approvals-and-sandbox"
+        return f'{self.bin} resume --last -c model="gpt-5.4" --dangerously-bypass-approvals-and-sandbox'
 
     def pre_prompt_keys(self) -> list[str]:
         # Codex shows "Do you trust this directory?" on first start in a new dir
