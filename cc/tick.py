@@ -140,11 +140,25 @@ class Host:
         return f"{self.user}@{self.name}"
 
     def expand(self, p: str) -> str:
-        """Expand ~ for paths on the local host. Remote paths get sent as-is
-        and ssh expands them in the remote shell."""
+        """Expand ~ to an absolute path. Local: Path.home(). Remote: cached
+        result of `echo $HOME` over the persistent shell. Required because
+        tmux's `-c <dir>` does chdir() (no shell expansion), and shlex.quote
+        on the way through HostShell prevents bash from expanding `~` either."""
         if self.is_local:
             return os.path.expanduser(p)
-        return p
+        if not (p == "~" or p.startswith("~/")):
+            return p
+        home = _REMOTE_HOME.get(self.name)
+        if home is None:
+            from host_shell import get_shell
+            sh = get_shell(self.name, self.ssh_target, port=self.port)
+            res = sh.run(["sh", "-c", "echo $HOME"], timeout=20.0)
+            home = res.stdout.strip() or "/root"
+            _REMOTE_HOME[self.name] = home
+        return p.replace("~", home, 1)
+
+
+_REMOTE_HOME: dict[str, str] = {}
 
 
 _LOCAL_DEFAULTS = dict(
