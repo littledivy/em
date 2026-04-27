@@ -51,6 +51,10 @@ TMUX_BIN = "/opt/homebrew/bin/tmux"
 SOCKET_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-tmux-sockets"
 SOCKET = SOCKET_DIR / "deno-bot.sock"
 
+SCCACHE_BIN = "/opt/homebrew/bin/sccache"
+SCCACHE_DIR = str(Path.home() / ".cache/sccache")
+SCCACHE_CACHE_SIZE = "60G"
+
 CONCURRENT_CAP = 5
 OPEN_PR_CAP = 15  # max PRs currently open (review/monitoring); merged/closed free a slot
 ATTEMPTS_CAP = 5
@@ -1029,6 +1033,14 @@ def tick() -> None:
     LOGS.mkdir(parents=True, exist_ok=True)
     INBOX.mkdir(parents=True, exist_ok=True)
     WT_BASE.mkdir(parents=True, exist_ok=True)
+    Path(SCCACHE_DIR).mkdir(parents=True, exist_ok=True)
+    # Make sccache visible to every NEW tmux session on this socket
+    # (existing sessions won't pick it up until they respawn).
+    if Path(SCCACHE_BIN).exists():
+        for k, v in (("RUSTC_WRAPPER", SCCACHE_BIN),
+                     ("SCCACHE_DIR", SCCACHE_DIR),
+                     ("SCCACHE_CACHE_SIZE", SCCACHE_CACHE_SIZE)):
+            t("setenv", "-g", k, v)
 
     if HALT.exists():
         log("halted")
