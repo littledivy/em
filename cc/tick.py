@@ -1371,6 +1371,10 @@ def tick() -> None:
         if h.is_local and not Path(SCCACHE_BIN).exists():
             continue
         try:
+            # /tmp/claude-tmux-sockets/ is wiped on every VM reboot (tmpfs).
+            # tmux refuses to create the socket if the parent dir is gone.
+            if not h.is_local:
+                host_run(h, "mkdir", "-p", "/tmp/claude-tmux-sockets")
             t("setenv", "-g", "RUSTC_WRAPPER", sccache_bin, host=h)
             if shared_env:
                 for k, v in shared_env.items():
