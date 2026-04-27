@@ -39,3 +39,36 @@ unclaw_wrap = false
 # sccache_dir = "~/.cache/sccache"
 # sccache_cache_size = "60G"
 # unclaw_wrap = true
+
+# bot0 + bot1 share vm.littledivy.com (one box, two ssh users). `name`
+# disambiguates them in the DB / registry / tmux session prefix; `host` is
+# the DNS/IP used for ssh.
+[[vm]]
+name     = "bot0"
+host     = "vm.littledivy.com"
+user     = "bot0-linux"
+port     = 22
+capacity = 3
+clis     = ["codex"]
+wt_base  = "~/src/deno-wt"
+deno_src = "~/src/deno"
+build_prefix = ""
+sccache  = true
+sccache_dir = "~/.cache/sccache"
+sccache_cache_size = "60G"
+unclaw_wrap = true
+
+[[vm]]
+name     = "bot1"
+host     = "vm.littledivy.com"
+user     = "bot1-linux"
+port     = 22
+capacity = 3
+clis     = ["codex"]
+wt_base  = "~/src/deno-wt"
+deno_src = "~/src/deno"
+build_prefix = ""
+sccache  = true
+sccache_dir = "~/.cache/sccache"
+sccache_cache_size = "60G"
+unclaw_wrap = true

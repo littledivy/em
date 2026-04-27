@@ -118,7 +118,11 @@ def log(msg: str) -> None:
 
 @dataclass(frozen=True)
 class Host:
-    name: str       # "localhost" or hostname / public IP
+    name: str       # unique identifier — used as DB host column, tmux session
+                    # prefix, registry key. Defaults to ssh_host when ssh_host
+                    # is unique, but multiple Hosts on the same DNS (different
+                    # ssh users) MUST set distinct `name`s.
+    ssh_host: str   # DNS / IP for ssh; same as `name` for typical single-VM setup
     user: str       # ssh user (ignored when local)
     port: int       # ssh port (ignored when local)
     capacity: int
@@ -129,15 +133,15 @@ class Host:
     sccache: bool            # set RUSTC_WRAPPER on this host's tmux server
     sccache_dir: str         # path on the host
     sccache_cache_size: str  # e.g. "60G"
-    unclaw_wrap: bool        # if true, prepend `unclaw run --name <task> --` to the cli launch line
+    unclaw_wrap: bool        # if true, prepend `unclaw run --name divybot --` to the cli launch line
 
     @property
     def is_local(self) -> bool:
-        return self.name in ("localhost", "127.0.0.1")
+        return self.ssh_host in ("localhost", "127.0.0.1")
 
     @property
     def ssh_target(self) -> str:
-        return f"{self.user}@{self.name}"
+        return f"{self.user}@{self.ssh_host}"
 
     def expand(self, p: str) -> str:
         """Expand ~ to an absolute path. Local: Path.home(). Remote: cached
@@ -176,7 +180,7 @@ def load_hosts() -> list[Host]:
     except ModuleNotFoundError:
         log("tomllib unavailable (need py3.11+); falling back to localhost-only")
         return [Host(
-            name="localhost", user="", port=22, capacity=5,
+            name="localhost", ssh_host="localhost", user="", port=22, capacity=5,
             clis=("claude",),
             wt_base=str(WT_BASE), deno_src=str(DENO),
             **_LOCAL_DEFAULTS,
@@ -184,7 +188,7 @@ def load_hosts() -> list[Host]:
     cfg_path = Path(__file__).parent / "vms.toml"
     if not cfg_path.exists():
         return [Host(
-            name="localhost", user="", port=22, capacity=5,
+            name="localhost", ssh_host="localhost", user="", port=22, capacity=5,
             clis=("claude",),
             wt_base=str(WT_BASE), deno_src=str(DENO),
             **_LOCAL_DEFAULTS,
@@ -192,8 +196,13 @@ def load_hosts() -> list[Host]:
     cfg = tomllib.loads(cfg_path.read_text())
     out: list[Host] = []
     for vm in cfg.get("vm", []):
+        # `host` in toml is the DNS/IP. `name` defaults to host but can be
+        # set distinctly when multiple Hosts share a DNS (different ssh users).
+        ssh_host = vm["host"]
+        name = vm.get("name", ssh_host)
         out.append(Host(
-            name=vm["host"],
+            name=name,
+            ssh_host=ssh_host,
             user=vm.get("user", os.environ.get("USER", "")),
             port=int(vm.get("port", 22)),
             capacity=int(vm.get("capacity", 1)),
@@ -211,7 +220,7 @@ def load_hosts() -> list[Host]:
 
 HOSTS: list[Host] = []  # populated by tick() before any worker call
 LOCAL_HOST = Host(
-    name="localhost", user="", port=22, capacity=5,
+    name="localhost", ssh_host="localhost", user="", port=22, capacity=5,
     clis=("claude",), wt_base=str(WT_BASE), deno_src=str(DENO),
     **_LOCAL_DEFAULTS,
 )
@@ -230,11 +239,15 @@ def host_for_task(row: dict) -> Host:
 
 def pick_host_cli(running_counts: dict[str, int]) -> tuple[Host, str] | None:
     """Choose least-loaded host with free capacity. Picks the first listed cli
-    on that host. Returns None when everything is full."""
+    on that host. Returns None when everything is full.
+
+    Tie-break prefers REMOTE hosts: localhost is the orchestrator's host and
+    we'd rather have remote VMs running real work when both are equally idle.
+    Otherwise rare-but-paid bot VMs sit unused while local handles everything."""
     candidates = [h for h in HOSTS if running_counts.get(h.name, 0) < h.capacity]
     if not candidates:
         return None
-    candidates.sort(key=lambda h: running_counts.get(h.name, 0))
+    candidates.sort(key=lambda h: (running_counts.get(h.name, 0), h.is_local))
     h = candidates[0]
     if not h.clis:
         return None
@@ -1118,7 +1131,7 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
             resume_cmd = f"{cli.bin} --continue --permission-mode bypassPermissions -n '{worker_name}'"
         inner = resume_cmd or cli.launch(sid, task)
         if host.unclaw_wrap:
-            inner = f"unclaw run --name {task} -- {inner}"
+            inner = f"unclaw run --name {BOT_USER} -- {inner}"
         cmd = f"{env_prefix}{inner}"
         tmux_send_line(session, cmd, host=host)
         time.sleep(6)
@@ -1298,7 +1311,7 @@ def spawn_worker(task: str) -> None:
     t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", wt_str, host=host)
     launch = cli.launch(sid, task)
     if host.unclaw_wrap:
-        launch = f"unclaw run --name {task} -- {launch}"
+        launch = f"unclaw run --name {BOT_USER} -- {launch}"
     tmux_send_line(session, launch, host=host)
     time.sleep(8)
     if cli.supports_remote_control():
