@@ -55,6 +55,10 @@ SCCACHE_BIN = "/opt/homebrew/bin/sccache"
 SCCACHE_DIR = str(Path.home() / ".cache/sccache")
 SCCACHE_CACHE_SIZE = "60G"
 
+# Tmux socket path on REMOTE hosts. Local mini uses SOCKET above. We use a
+# stable /tmp path on remotes (TMPDIR varies on macOS, /tmp is fine on Linux).
+REMOTE_SOCKET = "/tmp/claude-tmux-sockets/deno-bot.sock"
+
 CONCURRENT_CAP = 5
 OPEN_PR_CAP = 15  # max PRs currently open (review/monitoring); merged/closed free a slot
 ATTEMPTS_CAP = 5
@@ -109,6 +113,111 @@ def log(msg: str) -> None:
     print(f"[{now_iso()}] {msg}")
 
 
+# ── hosts (vms.toml) ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Host:
+    name: str       # "localhost" or hostname / public IP
+    user: str       # ssh user (ignored when local)
+    port: int       # ssh port (ignored when local)
+    capacity: int
+    clis: tuple[str, ...]
+    wt_base: str    # path on the host (may use ~)
+    deno_src: str
+    build_prefix: str        # e.g. "nix develop -c"; empty when system cargo works
+    sccache: bool            # set RUSTC_WRAPPER on this host's tmux server
+    sccache_dir: str         # path on the host
+    sccache_cache_size: str  # e.g. "60G"
+    unclaw_wrap: bool        # if true, prepend `unclaw run --name <task> --` to the cli launch line
+
+    @property
+    def is_local(self) -> bool:
+        return self.name in ("localhost", "127.0.0.1")
+
+    @property
+    def ssh_target(self) -> str:
+        return f"{self.user}@{self.name}"
+
+    def expand(self, p: str) -> str:
+        """Expand ~ for paths on the local host. Remote paths get sent as-is
+        and ssh expands them in the remote shell."""
+        if self.is_local:
+            return os.path.expanduser(p)
+        return p
+
+
+_LOCAL_DEFAULTS = dict(
+    build_prefix="nix develop -c",
+    sccache=True,
+    sccache_dir=str(Path.home() / ".cache/sccache"),
+    sccache_cache_size="60G",
+    unclaw_wrap=False,
+)
+
+
+def load_hosts() -> list[Host]:
+    import tomllib
+    cfg_path = Path(__file__).parent / "vms.toml"
+    if not cfg_path.exists():
+        return [Host(
+            name="localhost", user="", port=22, capacity=5,
+            clis=("claude",),
+            wt_base=str(WT_BASE), deno_src=str(DENO),
+            **_LOCAL_DEFAULTS,
+        )]
+    cfg = tomllib.loads(cfg_path.read_text())
+    out: list[Host] = []
+    for vm in cfg.get("vm", []):
+        out.append(Host(
+            name=vm["host"],
+            user=vm.get("user", os.environ.get("USER", "")),
+            port=int(vm.get("port", 22)),
+            capacity=int(vm.get("capacity", 1)),
+            clis=tuple(vm.get("clis", ["claude"])),
+            wt_base=vm.get("wt_base", str(WT_BASE)),
+            deno_src=vm.get("deno_src", str(DENO)),
+            build_prefix=vm.get("build_prefix", ""),
+            sccache=bool(vm.get("sccache", False)),
+            sccache_dir=vm.get("sccache_dir", "~/.cache/sccache"),
+            sccache_cache_size=vm.get("sccache_cache_size", "60G"),
+            unclaw_wrap=bool(vm.get("unclaw_wrap", False)),
+        ))
+    return out
+
+
+HOSTS: list[Host] = []  # populated by tick() before any worker call
+LOCAL_HOST = Host(
+    name="localhost", user="", port=22, capacity=5,
+    clis=("claude",), wt_base=str(WT_BASE), deno_src=str(DENO),
+    **_LOCAL_DEFAULTS,
+)
+
+
+def host_by_name(name: str) -> Host:
+    for h in HOSTS:
+        if h.name == name:
+            return h
+    return LOCAL_HOST
+
+
+def host_for_task(row: dict) -> Host:
+    return host_by_name(row.get("host") or "localhost")
+
+
+def pick_host_cli(running_counts: dict[str, int]) -> tuple[Host, str] | None:
+    """Choose least-loaded host with free capacity. Picks the first listed cli
+    on that host. Returns None when everything is full."""
+    candidates = [h for h in HOSTS if running_counts.get(h.name, 0) < h.capacity]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda h: running_counts.get(h.name, 0))
+    h = candidates[0]
+    if not h.clis:
+        return None
+    return h, h.clis[0]
+
+
 # ── shell helpers ─────────────────────────────────────────────────────────────
 
 
@@ -134,10 +243,13 @@ def run(
     )
 
 
-def gh_token(user: str = BOT_USER) -> str:
-    out = run("gh", "auth", "token", "--user", user)
+def gh_token(user: str = BOT_USER, host: "Host | None" = None) -> str:
+    if host is None or host.is_local:
+        out = run("gh", "auth", "token", "--user", user)
+    else:
+        out = host_run(host, "gh", "auth", "token", "--user", user)
     if out.returncode != 0:
-        raise SystemExit(f"no gh auth for user {user}")
+        raise SystemExit(f"no gh auth for user {user} on {host.name if host else 'localhost'}")
     return out.stdout.strip()
 
 
@@ -151,52 +263,67 @@ def gh_json(*args: str, repo: str = UPSTREAM_REPO) -> dict | list | None:
         return None
 
 
-# ── tmux ──────────────────────────────────────────────────────────────────────
+# ── host execution + tmux ─────────────────────────────────────────────────────
 
 
-def t(*args: str, capture: bool = True) -> subprocess.CompletedProcess[str]:
-    return run(TMUX_BIN, "-S", str(SOCKET), *args, capture=capture)
+def host_run(host: Host, *cmd: str, **kw) -> subprocess.CompletedProcess[str]:
+    """Run a command on `host`. Localhost = direct exec. Remote = ssh-wrapped
+    with the cmd joined as a single shell string (so quoting works the way you
+    expect for `tmux send-keys -- '<line>'`)."""
+    if host.is_local:
+        return run(*cmd, **kw)
+    import shlex
+    quoted = " ".join(shlex.quote(c) for c in cmd)
+    return run("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+               "-p", str(host.port), host.ssh_target, quoted, **kw)
 
 
-def tmux_has_session(name: str) -> bool:
-    return t("has-session", "-t", name).returncode == 0
+def t(*args: str, host: Host = LOCAL_HOST, capture: bool = True) -> subprocess.CompletedProcess[str]:
+    """tmux on a host. Local uses absolute SOCKET; remote uses REMOTE_SOCKET
+    and assumes `tmux` is on PATH there."""
+    if host.is_local:
+        return run(TMUX_BIN, "-S", str(SOCKET), *args, capture=capture)
+    return host_run(host, "tmux", "-S", REMOTE_SOCKET, *args, capture=capture)
 
 
-def tmux_kill(name: str) -> None:
-    t("kill-session", "-t", name)
+def tmux_has_session(name: str, host: Host = LOCAL_HOST) -> bool:
+    return t("has-session", "-t", name, host=host).returncode == 0
 
 
-def tmux_capture(session: str, lines: int = 500) -> str:
-    out = t("capture-pane", "-p", "-J", "-t", f"{session}:0.0", "-S", f"-{lines}")
+def tmux_kill(name: str, host: Host = LOCAL_HOST) -> None:
+    t("kill-session", "-t", name, host=host)
+
+
+def tmux_capture(session: str, lines: int = 500, host: Host = LOCAL_HOST) -> str:
+    out = t("capture-pane", "-p", "-J", "-t", f"{session}:0.0", "-S", f"-{lines}", host=host)
     return out.stdout if out.returncode == 0 else ""
 
 
-def tmux_paste(session: str, text: str, then_enter: bool = True) -> None:
-    t("set-buffer", "-b", "msg", "--", text)
-    t("paste-buffer", "-b", "msg", "-t", f"{session}:0.0")
+def tmux_paste(session: str, text: str, then_enter: bool = True, host: Host = LOCAL_HOST) -> None:
+    t("set-buffer", "-b", "msg", "--", text, host=host)
+    t("paste-buffer", "-b", "msg", "-t", f"{session}:0.0", host=host)
     if then_enter:
         time.sleep(1)
-        t("send-keys", "-t", f"{session}:0.0", "Enter")
+        t("send-keys", "-t", f"{session}:0.0", "Enter", host=host)
 
 
-def tmux_send_line(session: str, line: str) -> None:
-    t("send-keys", "-t", f"{session}:0.0", "--", line, "Enter")
+def tmux_send_line(session: str, line: str, host: Host = LOCAL_HOST) -> None:
+    t("send-keys", "-t", f"{session}:0.0", "--", line, "Enter", host=host)
 
 
-def tmux_clear_history(session: str) -> None:
-    t("clear-history", "-t", f"{session}:0.0")
+def tmux_clear_history(session: str, host: Host = LOCAL_HOST) -> None:
+    t("clear-history", "-t", f"{session}:0.0", host=host)
 
 
-def ensure_remote_control(session: str, attempts: int = 4) -> bool:
-    """Send /remote-control and verify it took. Slash commands silently drop
-    if the Claude TUI isn't ready yet, so retry until 'Remote Control active'
-    shows in the pane (or attempts run out)."""
+def ensure_remote_control(session: str, attempts: int = 4, host: Host = LOCAL_HOST) -> bool:
+    """Send /remote-control and verify it took (claude only).
+    No-op for non-claude CLIs since they have no equivalent."""
     for i in range(attempts):
-        if "Remote Control active" in tmux_capture(session, lines=80):
+        if "Remote Control active" in tmux_capture(session, lines=80, host=host):
             return True
-        tmux_send_line(session, "/remote-control")
+        tmux_send_line(session, "/remote-control", host=host)
         time.sleep(3 + i * 2)
-    return "Remote Control active" in tmux_capture(session, lines=80)
+    return "Remote Control active" in tmux_capture(session, lines=80, host=host)
 
 
 def tmux_list_unc_sessions() -> list[str]:
@@ -230,10 +357,20 @@ CREATE TABLE IF NOT EXISTS tasks(
   last_hash TEXT,
   idle_ticks INTEGER DEFAULT 0,
   last_pr_hash TEXT,
-  repo TEXT
+  repo TEXT,
+  host TEXT DEFAULT 'localhost',
+  cli TEXT DEFAULT 'claude',
+  session_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_status ON tasks(status);
 """
+
+# Idempotent schema migrations for existing DBs.
+_MIGRATIONS = [
+    "ALTER TABLE tasks ADD COLUMN host TEXT DEFAULT 'localhost'",
+    "ALTER TABLE tasks ADD COLUMN cli TEXT DEFAULT 'claude'",
+    "ALTER TABLE tasks ADD COLUMN session_id TEXT",
+]
 
 
 @contextmanager
@@ -251,6 +388,11 @@ def db_init() -> None:
     ROOT.mkdir(parents=True, exist_ok=True)
     with db() as c:
         c.executescript(SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
 def task_get(task_id: str) -> dict | None:
@@ -356,8 +498,22 @@ def extract_body(pane: str, max_len: int = 4000) -> str:
 # ── git / pr helpers ──────────────────────────────────────────────────────────
 
 
-def git(*args: str, cwd: str | Path, env: dict | None = None) -> subprocess.CompletedProcess[str]:
-    return run("git", *args, cwd=cwd, env=env)
+def git(*args: str, cwd: str | Path, env: dict | None = None,
+        host: Host = LOCAL_HOST) -> subprocess.CompletedProcess[str]:
+    if host.is_local:
+        return run("git", *args, cwd=cwd, env=env)
+    # Remote: use `git -C <cwd>` so the ssh shell doesn't need to chdir.
+    # Env-var prefix turns into a shell-prefix, which host_run quote-handles.
+    env_prefix: list[str] = []
+    if env:
+        # Only forward GIT_* + GH_TOKEN; everything else inherits remote shell.
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                  "GIT_COMMITTER_EMAIL", "GH_TOKEN"):
+            if k in env:
+                env_prefix += [f"{k}={env[k]}"]
+    cmd = ["env", *env_prefix, "git", "-C", str(cwd), *args] if env_prefix \
+          else ["git", "-C", str(cwd), *args]
+    return host_run(host, *cmd)
 
 
 def git_env(author: str, email: str | None = None) -> dict[str, str]:
@@ -460,46 +616,54 @@ def pr_counts(pr_data: dict, inline: list) -> dict[str, int]:
 
 
 def post_worker(task: str) -> None:
-    wt = WT_BASE / task
     row = task_get(task) or {}
+    host = host_for_task(row)
+    wt = Path(host.expand(host.wt_base)) / task
     branch = row.get("branch") or f"claude/{task}"
     session = session_for_dn(task)
-    pane = tmux_capture(session)
+    pane = tmux_capture(session, host=host)
     title = extract_title(pane) or f"fix(ext/node): enable {task}"
 
     existing_pr = row.get("pr_url") or ""
 
     # No-diff handling: if PR exists, push any local commits; else abandon.
     has_uncommitted = (
-        git("diff", "--quiet", "HEAD", cwd=wt).returncode != 0
-        or bool(git("status", "--porcelain", cwd=wt).stdout.strip())
+        git("diff", "--quiet", "HEAD", cwd=wt, host=host).returncode != 0
+        or bool(git("status", "--porcelain", cwd=wt, host=host).stdout.strip())
     )
     if not has_uncommitted:
         if not existing_pr:
             log(f"no diff: {task}")
             task_update(task, status="abandoned", last_error="no diff")
-            tmux_kill(session)
-            shutil.rmtree(wt / "target", ignore_errors=True)
+            tmux_kill(session, host=host)
+            if host.is_local:
+                shutil.rmtree(wt / "target", ignore_errors=True)
             return
         log(f"no uncommitted diff but PR exists — pushing any local commits: {task}")
 
-    token = gh_token(BOT_USER)
     env = git_env(BOT_USER)
-    env["GH_TOKEN"] = token
+    if host.is_local:
+        # Local: keep token-in-URL pattern (works whether or not gh auth setup-git ran).
+        token = gh_token(BOT_USER)
+        env["GH_TOKEN"] = token
+        bot_url = f"https://x-access-token:{token}@github.com/{BOT_FORK}.git"
+    else:
+        # Remote: rely on the VM's `gh auth setup-git` credential helper.
+        bot_url = f"https://github.com/{BOT_FORK}.git"
 
     # Commit if there's anything to commit (no-op otherwise)
-    git("add", "-A", cwd=wt)
+    git("add", "-A", cwd=wt, host=host)
     commit_msg = (
         f"{title}\n\nEnables tests/node_compat/runner/suite/test/parallel/{task}.js\n"
         f"\nCo-authored-by: Divy Srivastava <me@littledivy.com>"
     )
-    git("commit", "-m", commit_msg, cwd=wt, env=env)
+    git("commit", "-m", commit_msg, cwd=wt, env=env, host=host)
 
     # Ensure bot remote exists
-    if git("remote", "get-url", "bot", cwd=wt).returncode != 0:
-        git("remote", "add", "bot", f"https://x-access-token:{token}@github.com/{BOT_FORK}.git", cwd=wt)
+    if git("remote", "get-url", "bot", cwd=wt, host=host).returncode != 0:
+        git("remote", "add", "bot", bot_url, cwd=wt, host=host)
 
-    git("push", "-u", "bot", branch, cwd=wt, env=env)
+    git("push", "-u", "bot", branch, cwd=wt, env=env, host=host)
 
     if existing_pr:
         pr_url = existing_pr
@@ -509,17 +673,20 @@ def post_worker(task: str) -> None:
             f"## Summary\n\nEnables `{task}` in node_compat suite.\n\n"
             f"## Test plan\n- [x] `cargo test --test node_compat -- {task}`"
         )
+        # gh pr create runs from mini (orchestrator), which always has divybot auth.
+        mini_token = gh_token(BOT_USER)
         out = run(
             "gh", "pr", "create", "--repo", UPSTREAM_REPO,
             "--head", f"{BOT_USER}:{branch}", "--title", title, "--body", body,
-            env={**env, "GH_TOKEN": token},
+            env={**env, "GH_TOKEN": mini_token},
         )
         pr_url = out.stdout.strip().splitlines()[-1] if out.returncode == 0 else ""
         log(f"PR: {pr_url}")
 
     task_update(task, status="review", pr_url=pr_url, last_pr_hash="")
-    tmux_kill(session)
-    shutil.rmtree(wt / "target", ignore_errors=True)
+    tmux_kill(session, host=host)
+    if host.is_local:
+        shutil.rmtree(wt / "target", ignore_errors=True)
     log(f"PR opened, session killed; review-poll handles CI/comments/conflicts: {task}")
 
 
@@ -531,11 +698,13 @@ def deliver_inbox() -> None:
         return
     for msg in INBOX.glob("*.txt"):
         task = msg.stem
+        row = task_get(task) or {}
+        host = host_for_task(row)
         session = session_for_dn(task)
-        if not tmux_has_session(session):
+        if not tmux_has_session(session, host=host):
             log(f"inbox msg for {task} but no live session; leaving")
             continue
-        tmux_paste(session, msg.read_text())
+        tmux_paste(session, msg.read_text(), host=host)
         log(f"delivered inbox msg to {task}")
         task_update(task, idle_ticks=0)
         msg.unlink()
@@ -544,13 +713,15 @@ def deliver_inbox() -> None:
 def poll_running() -> None:
     for row in tasks_with("running", exclude_unclaw=True):
         task = row["id"]
+        host = host_for_task(row)
         session = session_for_dn(task)
-        if not tmux_has_session(session):
-            log(f"session dead: {task}")
+        if not tmux_has_session(session, host=host):
+            log(f"session dead: {task} (host={host.name})")
             task_update(task, status="failed", last_error="session died")
-            shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
+            if host.is_local:
+                shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             continue
-        pane = tmux_capture(session)
+        pane = tmux_capture(session, host=host)
         # No-action takes priority over DONE — worker may say "<<NODE_BOT_DONE>> ... flaky/unrelated/no code change",
         # which semantically means "nothing to do" not "ship this".
         if detect_no_action(pane):
@@ -563,8 +734,9 @@ def poll_running() -> None:
         if detect_escalate(pane):
             log(f"ESCALATE: {task}")
             task_update(task, status="abandoned", last_error="escalate")
-            tmux_kill(session)
-            shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
+            tmux_kill(session, host=host)
+            if host.is_local:
+                shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             continue
         # Idle detection
         import hashlib
@@ -577,8 +749,9 @@ def poll_running() -> None:
             if idle >= IDLE_TICKS_CAP:
                 log(f"idle {IDLE_TICKS_CAP} ticks, killing: {task}")
                 task_update(task, status="failed", last_error="idle timeout")
-                tmux_kill(session)
-                shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
+                tmux_kill(session, host=host)
+                if host.is_local:
+                    shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             else:
                 log(f"thinking ({idle}/{IDLE_TICKS_CAP}): {task}")
         else:
@@ -592,11 +765,13 @@ def handle_no_action(task: str) -> None:
     repo = row.get("repo") or UPSTREAM_REPO
     prev_err = row.get("last_error") or ""
     session = session_for_dn(task)
+    host = host_for_task(row)
     if not pr:
         log(f"no-action: {task} → abandoned (worker says already fixed/moot)")
         task_update(task, status="abandoned", last_error="no-action: already fixed/moot")
-        tmux_kill(session)
-        shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
+        tmux_kill(session, host=host)
+        if host.is_local:
+            shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
         return
 
     log(f"no-action: {task} → review (worker says PR is fine; storing hash)")
@@ -619,7 +794,7 @@ def handle_no_action(task: str) -> None:
     # If PR is already green, no ping needed — operator can just merge.
     failing_checks = [c for c in (sc.get("statusCheckRollup") or []) if c.get("conclusion") == "FAILURE"]
     if not prev_err.startswith("no-action:") and failing_checks:
-        pane = tmux_capture(session)
+        pane = tmux_capture(session, host=host)
         recent = "\n".join(pane.splitlines()[-20:])
         m = re.search(r"<>(.*)", recent)
         reason = (m.group(1).strip()[:500] if m else "")
@@ -639,8 +814,9 @@ def handle_no_action(task: str) -> None:
     # Compute current hash and store so review-poll stays silent.
     h, _, _ = fetch_pr_signal(pr_num, repo)
     task_update(task, status="review", last_error="no-action: pinged @littledivy", last_pr_hash=h)
-    tmux_kill(session)
-    shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
+    tmux_kill(session, host=host)
+    if host.is_local:
+        shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
 
 
 def poll_monitoring() -> None:
@@ -652,7 +828,7 @@ def poll_monitoring() -> None:
         if task.startswith("unclaw:"):
             tmux_kill(session_for_unc(task.removeprefix("unclaw:")))
         else:
-            tmux_kill(session_for_dn(task))
+            tmux_kill(session_for_dn(task), host=host_for_task(row))
 
 
 def poll_unclaw() -> None:
@@ -815,12 +991,15 @@ def poll_review() -> None:
 
 def paste_update_to_live_worker(task: str, repo: str, pr_num: str, counts: dict[str, int]) -> None:
     """Paste a 'new feedback arrived' message to a worker session that's already alive."""
+    row = task_get(task) or {}
     if task.startswith("unclaw:"):
         slug = task.removeprefix("unclaw:")
         session = session_for_unc(slug)
+        host = LOCAL_HOST
     else:
         session = session_for_dn(task)
-    if not tmux_has_session(session):
+        host = host_for_task(row)
+    if not tmux_has_session(session, host=host):
         log(f"live worker session gone for {task}; bouncing to review for next-tick respawn")
         task_update(task, status="review", last_pr_hash="")
         return
@@ -844,12 +1023,18 @@ def paste_update_to_live_worker(task: str, repo: str, pr_num: str, counts: dict[
         f"or asks whether the PR is worth landing, print `<<NODE_BOT_ESCALATE>> reviewer questioning PR — operator decides`."
         f"{conflict_note}"
     )
-    tmux_paste(session, msg)
+    tmux_paste(session, msg, host=host)
     log(f"pasted update to live worker: {task} (#{pr_num}) — fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}")
 
 
 def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[str, int]) -> None:
     """Resume the worker session and paste a feedback checklist."""
+    from cli_adapters import adapter_for
+    row = task_get(task) or {}
+    host = host_for_task(row)
+    cli_name = row.get("cli") or "claude"
+    sid = row.get("session_id") or ""
+
     if task.startswith("unclaw:"):
         slug = task.removeprefix("unclaw:")
         wt = UNCLAW_WT_BASE / slug
@@ -863,7 +1048,7 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
             "`git add -A && git commit -m \"$(printf '%s\\n\\nCo-authored-by: Divy Srivastava <me@littledivy.com>' '<msg>')\" && git push origin HEAD`)."
         )
     else:
-        wt = WT_BASE / task
+        wt = (WT_BASE / task) if host.is_local else Path(host.wt_base) / task
         session = session_for_dn(task)
         worker_name = f"deno-bot:{task}"
         env_prefix = ""
@@ -874,18 +1059,38 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
             "`git add -A && git commit -m \"$(printf '%s\\n\\nCo-authored-by: Divy Srivastava <me@littledivy.com>' '<msg>')\" && git push bot HEAD`)."
         )
 
-    if not tmux_has_session(session):
-        if not wt.exists():
-            log(f"worktree gone, can't resume {task}")
-            return
-        trust_worktree(wt)
-        install_trailer_hook(wt)
-        t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", str(wt))
-        cmd = f"{env_prefix}{CLAUDE_BIN} --continue --permission-mode bypassPermissions -n '{worker_name}'"
-        tmux_send_line(session, cmd)
+    cli = adapter_for(cli_name)
+
+    if not tmux_has_session(session, host=host):
+        # Worktree existence check: local can stat directly; remote uses ssh test.
+        if host.is_local:
+            if not wt.exists():
+                log(f"worktree gone, can't resume {task}")
+                return
+            trust_worktree(wt)
+            install_trailer_hook(wt)
+        else:
+            chk = host_run(host, "test", "-d", str(wt))
+            if chk.returncode != 0:
+                log(f"worktree gone on {host.name}, can't resume {task}")
+                return
+            if cli_name == "claude":
+                trust_worktree_remote(host, str(wt))
+        t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", str(wt), host=host)
+        # Prefer cli-specific resume; fall back to cli.launch for clis that don't resume.
+        resume_cmd = cli.resume(sid, task) if sid else None
+        if resume_cmd is None and cli_name == "claude":
+            # legacy claude with no session_id stored: --continue picks last in cwd
+            resume_cmd = f"{cli.bin} --continue --permission-mode bypassPermissions -n '{worker_name}'"
+        inner = resume_cmd or cli.launch(sid, task)
+        if host.unclaw_wrap:
+            inner = f"unclaw run --name {task} -- {inner}"
+        cmd = f"{env_prefix}{inner}"
+        tmux_send_line(session, cmd, host=host)
         time.sleep(6)
-        ensure_remote_control(session)
-        tmux_clear_history(session)
+        if cli.supports_remote_control():
+            ensure_remote_control(session, host=host)
+        tmux_clear_history(session, host=host)
 
     push_remote = "origin" if task.startswith("unclaw:") else "bot"
     conflict_block = ""
@@ -912,7 +1117,7 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         f"When everything is addressed, print exactly: `<<NODE_BOT_DONE>> <one-line summary>`."
         f"{conflict_block}"
     )
-    tmux_paste(session, fb)
+    tmux_paste(session, fb, host=host)
     with db() as c:
         c.execute(
             "UPDATE tasks SET status='running', attempts=attempts+1, updated_at=? WHERE id=?",
@@ -998,49 +1203,115 @@ def pick_task() -> str | None:
     return None
 
 
+def _running_counts_per_host() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    with db() as c:
+        for r in c.execute("SELECT host, COUNT(*) c FROM tasks WHERE status='running' GROUP BY host"):
+            counts[r["host"] or "localhost"] = r["c"]
+    return counts
+
+
+def trust_worktree_remote(host: Host, wt_path: str) -> None:
+    """Add wt_path to the remote ~/.claude.json projects map."""
+    py = (
+        "import json,os,sys;p=os.path.expanduser('~/.claude.json');"
+        "open(p,'a').close() if not os.path.exists(p) else None;"
+        "d=json.load(open(p)) if os.path.getsize(p) else {};"
+        "d.setdefault('projects',{}).setdefault(sys.argv[1],{})['hasTrustDialogAccepted']=True;"
+        "d['remoteDialogSeen']=True;"
+        "json.dump(d,open(p,'w'),indent=2)"
+    )
+    host_run(host, "python3", "-c", py, wt_path)
+
+
 def spawn_worker(task: str) -> None:
-    wt = WT_BASE / task
+    from cli_adapters import adapter_for
+    import uuid as _uuid
+
+    counts = _running_counts_per_host()
+    pick = pick_host_cli(counts)
+    if not pick:
+        log("no host with capacity; skipping spawn")
+        return
+    host, cli_name = pick
+    cli = adapter_for(cli_name)
+
+    # Worker path: ~ stays raw on remote (ssh expands it); expand here for local.
+    base_str = host.expand(host.wt_base)
+    deno_str = host.expand(host.deno_src)
+    wt_str = f"{base_str}/{task}"
+    wt_local = Path(wt_str) if host.is_local else None
     branch = f"claude/{task}"
     session = session_for_dn(task)
-    run("git", "-C", str(DENO), "fetch", "origin", "main", "--quiet")
-    add = run("git", "-C", str(DENO), "worktree", "add", "-B", branch, str(wt), "origin/main")
+    sid = str(_uuid.uuid4())
+
+    # Worktree creation on the worker's host.
+    host_run(host, "git", "-C", deno_str, "fetch", "origin", "main", "--quiet")
+    add = host_run(host, "git", "-C", deno_str, "worktree", "add", "-B", branch, wt_str, "origin/main")
     if add.returncode != 0:
-        run("git", "-C", str(DENO), "worktree", "add", str(wt), branch)
-    git("config", "user.name", BOT_USER, cwd=wt)
-    git("config", "user.email", f"{BOT_USER}@users.noreply.github.com", cwd=wt)
-    install_trailer_hook(wt)
-    tmux_kill(session)
-    trust_worktree(wt)
-    t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", str(wt))
-    tmux_send_line(session, f"{CLAUDE_BIN} --permission-mode bypassPermissions -n 'deno-bot:{task}'")
+        host_run(host, "git", "-C", deno_str, "worktree", "add", wt_str, branch)
+    git("config", "user.name", BOT_USER, cwd=wt_str, host=host)
+    git("config", "user.email", f"{BOT_USER}@users.noreply.github.com", cwd=wt_str, host=host)
+
+    if host.is_local and wt_local:
+        install_trailer_hook(wt_local)
+        trust_worktree(wt_local)
+    elif cli_name == "claude":
+        # Claude on a remote VM still needs the workspace pre-trusted there.
+        trust_worktree_remote(host, wt_str)
+
+    tmux_kill(session, host=host)
+    t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", wt_str, host=host)
+    launch = cli.launch(sid, task)
+    if host.unclaw_wrap:
+        launch = f"unclaw run --name {task} -- {launch}"
+    tmux_send_line(session, launch, host=host)
     time.sleep(8)
-    ensure_remote_control(session)
+    if cli.supports_remote_control():
+        ensure_remote_control(session, host=host)
 
     prompt_template = (Path(__file__).parent / "prompt.md").read_text()
     file_hint = re.sub(r"^test-([a-z0-9]*).*", r"\1", task)
-    prompt = prompt_template.replace("<NAME>", task).replace("<file>", file_hint)
-    tmux_paste(session, prompt)
+    prompt = (
+        prompt_template
+        .replace("<NAME>", task)
+        .replace("<file>", file_hint)
+        .replace("{{BUILD_PREFIX}}", host.build_prefix)
+    )
+    tmux_paste(session, prompt, host=host)
 
-    task_insert(task, status="running", branch=branch)
-    log(f"spawned: {task} in tmux session {session}")
+    task_insert(task, status="running", branch=branch, host=host.name, cli=cli_name, session_id=sid)
+    log(f"spawned: {task} on {host.name} via {cli_name} (sid={sid[:8]})")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
 def tick() -> None:
+    global HOSTS
+    HOSTS = load_hosts()
+
     SOCKET_DIR.mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
     INBOX.mkdir(parents=True, exist_ok=True)
     WT_BASE.mkdir(parents=True, exist_ok=True)
-    Path(SCCACHE_DIR).mkdir(parents=True, exist_ok=True)
-    # Make sccache visible to every NEW tmux session on this socket
-    # (existing sessions won't pick it up until they respawn).
-    if Path(SCCACHE_BIN).exists():
-        for k, v in (("RUSTC_WRAPPER", SCCACHE_BIN),
-                     ("SCCACHE_DIR", SCCACHE_DIR),
-                     ("SCCACHE_CACHE_SIZE", SCCACHE_CACHE_SIZE)):
-            t("setenv", "-g", k, v)
+
+    # Per-host sccache: configure RUSTC_WRAPPER on each host's tmux server.
+    # Existing sessions on a server won't pick it up until they respawn.
+    for h in HOSTS:
+        if not h.sccache:
+            continue
+        if h.is_local:
+            Path(h.sccache_dir.replace("~", str(Path.home()))).mkdir(parents=True, exist_ok=True)
+        else:
+            host_run(h, "mkdir", "-p", h.sccache_dir)
+        # Resolve sccache binary on the host. Local: hard path; remote: assume on PATH.
+        sccache_bin = SCCACHE_BIN if h.is_local else "sccache"
+        if h.is_local and not Path(SCCACHE_BIN).exists():
+            continue
+        t("setenv", "-g", "RUSTC_WRAPPER", sccache_bin, host=h)
+        t("setenv", "-g", "SCCACHE_DIR", h.sccache_dir, host=h)
+        t("setenv", "-g", "SCCACHE_CACHE_SIZE", h.sccache_cache_size, host=h)
 
     if HALT.exists():
         log("halted")
@@ -1068,13 +1339,12 @@ def tick() -> None:
         log(f"open PR cap ({open_prs})")
         return
 
-    # Concurrent cap
-    with db() as c:
-        running = c.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='running'"
-        ).fetchone()[0]
-    if running >= CONCURRENT_CAP:
-        log(f"concurrent cap ({running})")
+    # Per-host capacity check (replaces the old global CONCURRENT_CAP).
+    counts = _running_counts_per_host()
+    total_capacity = sum(h.capacity for h in HOSTS)
+    total_running = sum(counts.values())
+    if total_running >= total_capacity:
+        log(f"all hosts full ({total_running}/{total_capacity})")
         return
 
     task = pick_task()

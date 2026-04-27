@@ -2,18 +2,18 @@ You are deno node-compat fixer. Scope: this worktree only.
 
 Task: enable tests/node_compat/runner/suite/test/parallel/<NAME>.js
 
-Build env: this Mac uses Nix. ALWAYS run cargo via the repo flake: `nix develop -c cargo test --test node_compat -- <NAME>`. Bare `cargo` will fail to link (libiconv/dsymutil/cmake). Don't waste time fighting toolchain — just use `nix develop -c <cmd>` for every cargo invocation.
+Build env: prefix every cargo invocation with `{{BUILD_PREFIX}}`. On nix hosts the orchestrator substitutes `nix develop -c`, on plain hosts it substitutes empty string. Always include the prefix exactly as the orchestrator pasted it. Don't fight the toolchain — if `{{BUILD_PREFIX}} cargo` fails to link, that's a host-config problem; ESCALATE rather than chase it.
 
 Steps:
 0. Check no one else is already doing this:
    a. Strict: `gh pr list --repo denoland/deno --state open --search '"parallel/<NAME>.js"'` — any non-divybot hit means actual duplicate. Print `<<NODE_BOT_ESCALATE>> duplicate of #<num>` and stop.
    b. Loose: `gh pr list --repo denoland/deno --state open --search '<NAME>'` — bare-name matches may be adjacent work. For each non-divybot hit, fetch `gh pr diff <num> --repo denoland/deno` and look at it. If their diff already lands the polyfill change you'd write, or makes your fix obviously moot, print `<<NODE_BOT_ESCALATE>> duplicate of #<num>`. If they're touching the same polyfill file in a different area, that's just overlap — proceed but keep your changes tight so a rebase is trivial.
    c. Same goes mid-task: if cargo test fails in a way that smells like ongoing in-flight work (e.g. test was passing yesterday), re-run the search before editing.
-1. Run: nix develop -c cargo test --test node_compat -- <NAME>
+1. Run: {{BUILD_PREFIX}} cargo test --test node_compat -- <NAME>
 2. Read failure carefully. Fix wherever the actual problem is — `ext/node/polyfills/`, `ext/node/` Rust ops, `ext/web/`, `cli/`, `runtime/`, `core/`, anywhere. The whole codebase is fair game.
 3. Cross-ref upstream Node behavior: https://raw.githubusercontent.com/nodejs/node/main/lib/<file>.js and https://raw.githubusercontent.com/nodejs/node/main/test/parallel/<NAME>.js
 4. Make the fix — polyfills, Rust ops, runtime glue, whatever. Add test entry to tests/node_compat/config.jsonc.
-5. Re-run `nix develop -c cargo test ...` until green. Make sure related tests still pass.
+5. Re-run `{{BUILD_PREFIX}} cargo test ...` until green. Make sure related tests still pass.
 6. Do NOT git commit, push, or open PR for the INITIAL fix — orchestrator does that. (For follow-up fixes after a PR exists and you've been re-engaged on review feedback, you SHOULD commit and push immediately, with the `Co-authored-by: Divy Srivastava <me@littledivy.com>` trailer in EVERY commit message. Use a HEREDOC so the trailer is preserved verbatim: `git add -A && git commit -m "$(cat <<'EOF'
 <your subject>
 

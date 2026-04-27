@@ -1,0 +1,41 @@
+# VMs where workers run. localhost = the box that orchestrator runs on.
+# Each VM declares which CLIs it can launch; spawn_worker picks the
+# least-loaded VM that supports the requested CLI.
+#
+# Per-VM prereqs (when host != localhost):
+#   - reachable via ssh (key-auth) at user@host[:port]
+#   - gh authed as divybot WITH `gh auth setup-git` so plain HTTPS pushes work
+#   - chosen CLI binaries on PATH; each authed (claude /login, codex login,
+#     GEMINI_API_KEY env)
+#   - tmux + git on PATH
+#   - if build_prefix uses nix: nix installed; else system cargo + linker work
+#   - if sccache=true: sccache binary on PATH
+#   - if unclaw_wrap=true: unclaw cli on PATH and authed
+#   - directories at wt_base + deno_src, deno_src is a clone of denoland/deno
+
+[[vm]]
+host    = "localhost"
+capacity = 5
+clis    = ["claude"]
+wt_base = "~/src/deno-wt"
+deno_src = "~/src/deno"
+build_prefix = "nix develop -c"
+sccache = true
+sccache_dir = "~/.cache/sccache"
+sccache_cache_size = "60G"
+unclaw_wrap = false
+
+# Example public-IP linux VM: bare cargo (no nix), shared sccache, unclaw-wrapped.
+# [[vm]]
+# host    = "1.2.3.4"
+# user    = "ubuntu"
+# port    = 22
+# capacity = 2
+# clis    = ["codex", "gemini"]
+# wt_base = "~/src/deno-wt"
+# deno_src = "~/src/deno"
+# build_prefix = ""
+# sccache = true
+# sccache_dir = "~/.cache/sccache"
+# sccache_cache_size = "60G"
+# unclaw_wrap = true
