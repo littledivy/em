@@ -1399,8 +1399,11 @@ def tick() -> None:
             continue
         try:
             t("setenv", "-g", "CARGO_NET_OFFLINE", "true", host=h)
+            # Bot VMs are 8GB; default cargo parallelism × rustc memory
+            # blows past on the link step. Cap to 2 parallel jobs.
+            t("setenv", "-g", "CARGO_BUILD_JOBS", "2", host=h)
         except Exception as e:
-            log(f"CARGO_NET_OFFLINE push failed for {h.name}: {e}")
+            log(f"remote env push failed for {h.name}: {e}")
 
     if HALT.exists():
         log("halted")
