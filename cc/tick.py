@@ -710,12 +710,24 @@ def post_worker(task: str) -> None:
     if git("remote", "get-url", "bot", cwd=wt, host=host).returncode != 0:
         git("remote", "add", "bot", bot_url, cwd=wt, host=host)
 
-    git("push", "-u", "bot", branch, cwd=wt, env=env, host=host)
+    push = git("push", "-u", "bot", branch, cwd=wt, env=env, host=host)
+    if push.returncode != 0:
+        err = (push.stderr or push.stdout or "").strip()[:300]
+        log(f"git push FAILED: {task} (rc={push.returncode}, err={err!r})")
+        task_update(task, status="failed",
+                    last_error=f"git push failed (rc={push.returncode}): {err[:120]}")
+        tmux_kill(session, host=host)
+        return
 
     if existing_pr:
         pr_url = existing_pr
         log(f"PR updated: {pr_url}")
     else:
+        if not title:
+            log(f"PR create skipped: empty title (worker sentinel had no title) — {task}")
+            task_update(task, status="failed", last_error="empty PR title from worker")
+            tmux_kill(session, host=host)
+            return
         body = (
             f"## Summary\n\nEnables `{task}` in node_compat suite.\n\n"
             f"## Test plan\n- [x] `cargo test --test node_compat -- {task}`"
@@ -728,6 +740,13 @@ def post_worker(task: str) -> None:
             env={**env, "GH_TOKEN": mini_token},
         )
         pr_url = out.stdout.strip().splitlines()[-1] if out.returncode == 0 else ""
+        if out.returncode != 0 or not pr_url.startswith("https://"):
+            err = (out.stderr or out.stdout or "").strip()[:300]
+            log(f"PR create FAILED: {task} (rc={out.returncode}, err={err!r})")
+            task_update(task, status="failed",
+                        last_error=f"gh pr create failed (rc={out.returncode}): {err[:120]}")
+            tmux_kill(session, host=host)
+            return
         log(f"PR: {pr_url}")
 
     task_update(task, status="review", pr_url=pr_url, last_pr_hash="")
