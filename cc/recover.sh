@@ -35,9 +35,12 @@ H() {
 
 log() { echo "[recover] $*"; }
 
-# 1. Find newest jsonl. No fallback — if there's nothing to resume, bail.
-log "looking for newest orchestrator session jsonl on ${HOST:-localhost}"
-LATEST=$(H "ls -t '$PROJECT_DIR'/*.jsonl 2>/dev/null | head -1")
+# 1. Find LARGEST jsonl (by bytes). The pre-crash orchestrator session is
+# always far bigger than any fresh restart's jsonl, so picking by size beats
+# picking by mtime — avoids the race where a fresh respawn touches a tiny
+# jsonl right before we look.
+log "looking for largest orchestrator session jsonl on ${HOST:-localhost}"
+LATEST=$(H "ls -S '$PROJECT_DIR'/*.jsonl 2>/dev/null | head -1")
 if [ -z "$LATEST" ]; then
   log "no jsonl in $PROJECT_DIR. diagnosing what claude has stored:"
   H "ls -1 ~/.claude/projects/ 2>/dev/null | head -20" || true
@@ -45,40 +48,42 @@ if [ -z "$LATEST" ]; then
   exit 1
 fi
 UUID=$(basename "$LATEST" .jsonl)
-log "resuming uuid=$UUID"
+log "resuming uuid=$UUID (size $(H "ls -lh '$LATEST' 2>/dev/null | awk '{print \$5}'"))"
 
-# 2. Stop auto-respawn loop + any in-flight claude
-log "stopping orchestrator loop + claude"
-H "pkill -f 'bash $CC_DIR/orchestrator.sh' 2>/dev/null || true; pkill -f 'claude.*remote-control' 2>/dev/null || true; pkill -f 'claude --resume' 2>/dev/null || true"
+# 2. Stop legacy launchd job + any in-flight claude / orch loop. Idempotent.
+log "stopping legacy launchd + orch loop + claude"
+H "launchctl bootout gui/\$(id -u)/ai.deno-bot 2>/dev/null || true; pkill -f 'bash $CC_DIR/launcher.sh' 2>/dev/null || true; pkill -f 'bash $CC_DIR/orchestrator.sh' 2>/dev/null || true; pkill -f 'claude.*remote-control' 2>/dev/null || true; pkill -f 'claude --resume' 2>/dev/null || true"
 sleep 2
 
-# 3. Ensure orch tmux session exists; if not, ask launcher.sh to recreate it.
-if ! H "tmux -S '$SOCK' has-session -t orch 2>/dev/null"; then
-  log "orch tmux session missing; running launcher.sh"
-  H "bash $CC_DIR/launcher.sh </dev/null >/tmp/launcher.recover.out 2>&1 &"
-  sleep 5
+# 3. Ensure orch tmux session exists. We create it inline (no launcher.sh /
+# orchestrator.sh — those auto-loop a fresh claude which would race us).
+TMUX_BIN="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
+if ! H "$TMUX_BIN -S '$SOCK' has-session -t orch 2>/dev/null"; then
+  log "creating orch tmux session"
+  H "mkdir -p \$(dirname '$SOCK'); $TMUX_BIN -S '$SOCK' new-session -d -s orch -x 220 -y 60 -c '$CC_DIR' bash -l"
+  sleep 1
 fi
 
 # Interrupt whatever is currently in the orch pane (likely a dead claude).
-H "tmux -S '$SOCK' send-keys -t orch:0.0 C-c 2>/dev/null || true"
+H "$TMUX_BIN -S '$SOCK' send-keys -t orch:0.0 C-c 2>/dev/null || true"
 sleep 1
 
 # 4. Send the resume command
 log "sending claude --resume into orch pane"
-H "tmux -S '$SOCK' send-keys -t orch:0.0 -- \"cd $CC_DIR && $CLAUDE_BIN --resume $UUID --permission-mode bypassPermissions\" Enter"
+H "$TMUX_BIN -S '$SOCK' send-keys -t orch:0.0 -- \"cd $CC_DIR && $CLAUDE_BIN --resume $UUID --permission-mode bypassPermissions\" Enter"
 
 # 5. Wait for claude TUI; dismiss possible fork-prompt with Enter
 sleep 6
-H "tmux -S '$SOCK' send-keys -t orch:0.0 Enter 2>/dev/null || true"
+H "$TMUX_BIN -S '$SOCK' send-keys -t orch:0.0 Enter 2>/dev/null || true"
 sleep 4
 
 # 6. Enable remote-control for claude.ai/code (best-effort; newer claude may
 # have removed/renamed this slash. Failure prints "Unknown command" in pane
 # but is harmless — the local tmux session is fully usable either way.)
 log "trying /remote-control (best-effort)"
-H "tmux -S '$SOCK' send-keys -t orch:0.0 -- '/remote-control' Enter"
+H "$TMUX_BIN -S '$SOCK' send-keys -t orch:0.0 -- '/remote-control' Enter"
 sleep 5
 
 # 7. Show the result + URL
 log "current orch pane:"
-H "tmux -S '$SOCK' capture-pane -p -t orch:0.0 -S -60"
+H "$TMUX_BIN -S '$SOCK' capture-pane -p -t orch:0.0 -S -60"
