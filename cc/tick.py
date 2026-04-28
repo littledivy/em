@@ -710,7 +710,10 @@ def post_worker(task: str) -> None:
     if git("remote", "get-url", "bot", cwd=wt, host=host).returncode != 0:
         git("remote", "add", "bot", bot_url, cwd=wt, host=host)
 
-    push = git("push", "-u", "bot", branch, cwd=wt, env=env, host=host)
+    # --force-with-lease: bot-owned branches; safe to overwrite remote when
+    # local diverged (e.g. session restart re-did the commit), but refuse
+    # if upstream has unexpected commits we haven't seen.
+    push = git("push", "-u", "--force-with-lease", "bot", branch, cwd=wt, env=env, host=host)
     if push.returncode != 0:
         err = (push.stderr or push.stdout or "").strip()[:300]
         log(f"git push FAILED: {task} (rc={push.returncode}, err={err!r})")
