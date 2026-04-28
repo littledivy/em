@@ -782,10 +782,18 @@ def poll_running() -> None:
         host = host_for_task(row)
         session = session_for_dn(task)
         if not tmux_has_session(session, host=host):
-            log(f"session dead: {task} (host={host.name})")
-            task_update(task, status="failed", last_error="session died")
-            if host.is_local:
-                shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
+            pr_url = row.get("pr_url") or ""
+            if pr_url.startswith("https://"):
+                # Work already pushed upstream — flip to 'review' so poll_review
+                # respawns via `cli.resume(sid)` next tick (preserves session memory).
+                # Survives mac mini reboots / network blips without losing context.
+                log(f"session dead: {task} (host={host.name}); pr_url set → review for resume")
+                task_update(task, status="review", last_pr_hash="", last_error=None)
+            else:
+                log(f"session dead: {task} (host={host.name})")
+                task_update(task, status="failed", last_error="session died")
+                if host.is_local:
+                    shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             continue
         pane = tmux_capture(session, host=host)
         # No-action takes priority over DONE — worker may say "<<NODE_BOT_DONE>> ... flaky/unrelated/no code change",
