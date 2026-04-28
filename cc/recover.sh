@@ -72,8 +72,10 @@ sleep 6
 H "tmux -S '$SOCK' send-keys -t orch:0.0 Enter 2>/dev/null || true"
 sleep 4
 
-# 6. Enable remote-control for claude.ai/code
-log "enabling /remote-control"
+# 6. Enable remote-control for claude.ai/code (best-effort; newer claude may
+# have removed/renamed this slash. Failure prints "Unknown command" in pane
+# but is harmless — the local tmux session is fully usable either way.)
+log "trying /remote-control (best-effort)"
 H "tmux -S '$SOCK' send-keys -t orch:0.0 -- '/remote-control' Enter"
 sleep 5
 
