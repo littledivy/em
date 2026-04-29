@@ -71,7 +71,7 @@ VIEWER_URL = os.environ.get(
 
 # Auto-picker filter is now minimal — workers can land Rust changes too. Only skip tests that
 # inherently require Node internals (--expose-internals, internal/...) which Deno doesn't expose.
-PICKER_SKIP_RE = re.compile(r"^(?!test-http2-)")  # http2-only focus (operator)
+PICKER_SKIP_RE = re.compile(r"^(?!test-tls-|test-https-)")  # tls/https focus (operator)
 TEST_FILE_FLAG_SKIPS = (
     "--expose-internals",
     "internal/",
