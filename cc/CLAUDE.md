@@ -38,3 +38,17 @@ When unsure (risky test, Rust edit, exceed open-PR cap, anything destructive on 
 You are not on a timer by default. On "tick": run `python3 /Users/divy/cc/tick.py`, summarize what moved (tasks, PRs, blockers).
 
 If the operator asks you to monitor autonomously, schedule wakeups via `ScheduleWakeup` (~270s keeps prompt cache warm). Each wakeup: tick + peek anything stuck + push guidance + reschedule. Don't spam; one tick per wakeup.
+
+## Session bootstrap (fresh `/clear` or new session)
+
+The orchestrator session is rotated periodically to keep token cost bounded — see `TOKEN_AUDIT.md` for why. When you wake up with no conversation history:
+
+1. **Run `bash /Users/divy/cc/state.sh`** — prints halt status, active tmux panes, open-PR tasks, recently failed/abandoned tasks, last 10 commits to `~/gh/em` (orchestrator code history), capacity, and a cheat sheet. Read it fully.
+2. **Skim `git -C ~/gh/em log -20 --pretty='%h %s'`** if state.sh's last-10 isn't enough — recent commits are the diff between you-now and you-pre-clear. Notable subsystem patches: post_worker dedup, resurrect_no_pr, idle-with-PR park, push --force-with-lease, unclaw_wrap=true on local, codex split.
+3. **Skim memory** — `MEMORY.md` index in `~/.claude/projects/-Users-divy-cc/memory/` for durable preferences (e.g. cc/ source-of-truth is `~/gh/em`, not `/Users/divy/cc` directly).
+4. Then run a tick. The fleet is self-driving — your job is to summarize what moved and reschedule.
+
+**Quick mental model.**
+- `tick.py` is idempotent. Spawns workers in tmux up to `vms.toml` capacity. Detects `<<NODE_BOT_DONE>>` / `<<NODE_BOT_ESCALATE>>` sentinels. Polls open PRs and respawns workers on new feedback via `claude --resume <sid>` (preserves session memory).
+- `state.sh` is the canonical "what's the situation right now" tool. Always run it first if confused.
+- Code edits land in `/Users/divy/cc/<file>` (live runtime, no .git) AND must be `cp`'d to `~/gh/em/cc/<file>` then committed/pushed for persistence.

@@ -1174,12 +1174,9 @@ def resurrect_no_pr(task: str, row: dict, host) -> bool:
         ensure_remote_control(session, host=host)
     tmux_clear_history(session, host=host)
     nudge = (
-        f"Host crashed and your tmux session was killed; you've been resumed in "
-        f"a fresh pane in the same worktree. Continue working on {task} from where "
-        f"you left off. Re-check `git status` and `git log` to see what (if anything) "
-        f"was committed before the crash. When the fix is in and pushed (with the "
-        f"`Co-authored-by: Divy Srivastava <me@littledivy.com>` trailer), print "
-        f"`<<NODE_BOT_DONE>> <one-line summary>` exactly."
+        f"Host crashed; resumed in fresh pane, same worktree. "
+        f"Re-check `git status`/`git log`, continue where you left off, "
+        f"signal `<<NODE_BOT_DONE>> <summary>` when shipped."
     )
     tmux_paste(session, nudge, host=host)
     with db() as c:
@@ -1258,29 +1255,14 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         tmux_clear_history(session, host=host)
 
     push_remote = "origin" if task.startswith("unclaw:") else "bot"
-    conflict_block = ""
-    if counts.get("conflict"):
-        conflict_block = (
-            f"\n\n⚠️ MERGE CONFLICT against base branch. Resolve first:\n"
-            f"  git fetch origin\n"
-            f"  git rebase origin/main      # or `git merge origin/main`\n"
-            f"  # resolve conflicts in editor\n"
-            f"  git add -A && git rebase --continue\n"
-            f"  git push {push_remote} HEAD --force-with-lease\n"
-            f"After conflicts are resolved AND any failing checks are fixed, signal done."
-        )
+    # Slim nudge — gh cmd hints, HEREDOC commit example, trailer instruction
+    # all live in prompt.md and the worker already has them. Just signal what
+    # changed and the counts; let the worker drive. Saves ~1.3 KB per respawn.
+    suffix = f"  ⚠️ MERGE CONFLICT — `git fetch origin && git rebase origin/main` then `git push {push_remote} HEAD --force-with-lease`." if counts.get("conflict") else ""
     fb = (
-        f"PR #{pr_num} (https://github.com/{repo}/pull/{pr_num}) has new activity. Investigate and address EVERYTHING:\n"
-        f"- gh pr view {pr_num} --repo {repo} --comments\n"
-        f"- gh pr checks {pr_num} --repo {repo}\n"
-        f"- For failing checks: gh run view --log-failed --repo {repo} <run-id>\n"
-        f"- Inline review threads: gh api repos/{repo}/pulls/{pr_num}/comments\n"
-        f"Counts now: {counts['fail']} failing checks, {counts['comments']} issue comments, "
-        f"{counts['reviews']} reviews, {counts['inline']} inline review comments"
-        f"{', MERGE CONFLICT' if counts.get('conflict') else ''}.\n"
-        f"Address every reviewer comment, fix every failing check. {verify} "
-        f"When everything is addressed, print exactly: `<<NODE_BOT_DONE>> <one-line summary>`."
-        f"{conflict_block}"
+        f"PR #{pr_num} has new activity (counts: fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}). "
+        f"Address everything per prompt.md, push, then `<<NODE_BOT_DONE>> <one-line summary>`."
+        f"{suffix}"
     )
     tmux_paste(session, fb, host=host)
     with db() as c:
