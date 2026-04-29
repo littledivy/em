@@ -717,8 +717,16 @@ def post_worker(task: str) -> None:
     if push.returncode != 0:
         err = (push.stderr or push.stdout or "").strip()[:300]
         log(f"git push FAILED: {task} (rc={push.returncode}, err={err!r})")
-        task_update(task, status="failed",
-                    last_error=f"git push failed (rc={push.returncode}): {err[:120]}")
+        if existing_pr:
+            # PR already exists upstream — push diverged probably means the remote
+            # branch moved (force-with-lease lease rejected). Flip to review so the
+            # next review-poll respawns the worker via cli.resume(sid), and the
+            # worker can `git fetch && git rebase && git push --force-with-lease`.
+            task_update(task, status="review", last_pr_hash="",
+                        last_error=f"push rejected; review-poll will retry: {err[:120]}")
+        else:
+            task_update(task, status="failed",
+                        last_error=f"git push failed (rc={push.returncode}): {err[:120]}")
         tmux_kill(session, host=host)
         return
 
@@ -752,7 +760,13 @@ def post_worker(task: str) -> None:
             return
         log(f"PR: {pr_url}")
 
-    task_update(task, status="review", pr_url=pr_url, last_pr_hash="")
+    # Clear last_pr_hash only when we actually pushed new commits — otherwise
+    # review-poll sees a "fresh" PR each tick and re-fires feedback even when
+    # nothing changed (workers loop on DONE→push-noop→respawn→DONE forever).
+    if has_uncommitted:
+        task_update(task, status="review", pr_url=pr_url, last_pr_hash="")
+    else:
+        task_update(task, status="review", pr_url=pr_url)
     tmux_kill(session, host=host)
     if host.is_local:
         shutil.rmtree(wt / "target", ignore_errors=True)
@@ -792,6 +806,10 @@ def poll_running() -> None:
                 # Survives mac mini reboots / network blips without losing context.
                 log(f"session dead: {task} (host={host.name}); pr_url set → review for resume")
                 task_update(task, status="review", last_pr_hash="", last_error=None)
+            elif resurrect_no_pr(task, row, host):
+                # No PR yet, but session_id + worktree intact → resume in fresh tmux.
+                # Preserves whatever progress claude made before host crash.
+                pass
             else:
                 log(f"session dead: {task} (host={host.name})")
                 task_update(task, status="failed", last_error="session died")
@@ -824,11 +842,20 @@ def poll_running() -> None:
             idle += 1
             task_update(task, idle_ticks=idle)
             if idle >= IDLE_TICKS_CAP:
-                log(f"idle {IDLE_TICKS_CAP} ticks, killing: {task}")
-                task_update(task, status="failed", last_error="idle timeout")
-                tmux_kill(session, host=host)
-                if host.is_local:
-                    shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
+                pr_url = row.get("pr_url") or ""
+                if pr_url.startswith("https://"):
+                    # PR is live; idle worker is just done waiting. Flip to review
+                    # so review-poll respawns when reviewers comment / CI completes.
+                    log(f"idle {IDLE_TICKS_CAP} ticks, parking → review: {task}")
+                    task_update(task, status="review", last_pr_hash="",
+                                last_error=None, idle_ticks=0)
+                    tmux_kill(session, host=host)
+                else:
+                    log(f"idle {IDLE_TICKS_CAP} ticks, killing: {task}")
+                    task_update(task, status="failed", last_error="idle timeout")
+                    tmux_kill(session, host=host)
+                    if host.is_local:
+                        shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             else:
                 log(f"thinking ({idle}/{IDLE_TICKS_CAP}): {task}")
         else:
@@ -1102,6 +1129,59 @@ def paste_update_to_live_worker(task: str, repo: str, pr_num: str, counts: dict[
     )
     tmux_paste(session, msg, host=host)
     log(f"pasted update to live worker: {task} (#{pr_num}) — fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}")
+
+
+def resurrect_no_pr(task: str, row: dict, host) -> bool:
+    """Restart a dead worker that never opened a PR (host crash, etc).
+    Requires cli.resume + stored session_id + intact worktree. Returns True if
+    resurrected. Caller stays in poll_running's continue loop on True."""
+    from cli_adapters import adapter_for
+    cli_name = row.get("cli") or "claude"
+    sid = row.get("session_id") or ""
+    if not sid:
+        return False
+    cli = adapter_for(cli_name)
+    if cli.resume(sid, task) is None:
+        return False
+    wt = (WT_BASE / task) if host.is_local else Path(host.wt_base) / task
+    if host.is_local:
+        if not wt.exists():
+            return False
+        trust_worktree(wt)
+        install_trailer_hook(wt)
+    else:
+        if host_run(host, "test", "-d", str(wt)).returncode != 0:
+            return False
+        if cli_name == "claude":
+            trust_worktree_remote(host, str(wt))
+    session = session_for_dn(task)
+    worker_name = f"deno-bot:{task}"
+    t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", str(wt), host=host)
+    inner = cli.resume(sid, task)
+    if host.unclaw_wrap:
+        inner = f"unclaw run --name {BOT_USER} -- {inner}"
+    tmux_send_line(session, inner, host=host)
+    time.sleep(6)
+    if cli.supports_remote_control():
+        ensure_remote_control(session, host=host)
+    tmux_clear_history(session, host=host)
+    nudge = (
+        f"Host crashed and your tmux session was killed; you've been resumed in "
+        f"a fresh pane in the same worktree. Continue working on {task} from where "
+        f"you left off. Re-check `git status` and `git log` to see what (if anything) "
+        f"was committed before the crash. When the fix is in and pushed (with the "
+        f"`Co-authored-by: Divy Srivastava <me@littledivy.com>` trailer), print "
+        f"`<<NODE_BOT_DONE>> <one-line summary>` exactly."
+    )
+    tmux_paste(session, nudge, host=host)
+    with db() as c:
+        c.execute(
+            "UPDATE tasks SET status='running', attempts=attempts+1, "
+            "last_error=NULL, updated_at=? WHERE id=?",
+            (int(time.time()), task),
+        )
+    log(f"resurrected (no PR): {task} on {host.name} via {cli_name}")
+    return True
 
 
 def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[str, int]) -> None:
