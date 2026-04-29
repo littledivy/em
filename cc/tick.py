@@ -1431,9 +1431,14 @@ def spawn_worker(task: str) -> None:
     if host.unclaw_wrap:
         launch = f"unclaw run --name {BOT_USER} -- {launch}"
     tmux_send_line(session, launch, host=host)
-    time.sleep(8)
+    # Codex's MCP startup + trust-prompt rendering can take >8s; bump for non-claude.
+    time.sleep(8 if cli_name == "claude" else 14)
     if cli.supports_remote_control():
         ensure_remote_control(session, host=host)
+    # Answer any startup prompts (e.g. codex's "Do you trust this directory?").
+    for k in cli.pre_prompt_keys():
+        tmux_send_line(session, k, host=host)
+        time.sleep(2)
 
     prompt_template = (Path(__file__).parent / "prompt.md").read_text()
     file_hint = re.sub(r"^test-([a-z0-9]*).*", r"\1", task)
