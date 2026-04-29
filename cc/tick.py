@@ -375,6 +375,17 @@ def tmux_clear_history(session: str, host: Host = LOCAL_HOST) -> None:
 
 UNCLAW_FLAKE_MARKER = "tunnel activation failed or timed out"
 
+# Heuristic: any of these means a claude/codex TUI is rendering — its status
+# bar / footer is on screen. Used to short-circuit the settle wait once the
+# agent is clearly up, so healthy spawns don't pay the full unclaw-flake
+# timeout budget.
+AGENT_ALIVE_MARKERS = (
+    "bypass permissions",
+    "Remote Control",
+    "esc to interrupt",
+    "gpt-5",
+)
+
 
 def pane_unclaw_dead(session: str, host: Host = LOCAL_HOST) -> bool:
     """True if pane shows unclaw's xpc tunnel-activation flake. Symptom: unclaw
@@ -394,16 +405,30 @@ def launch_with_retry(
     cli=None,
     max_retries: int = 1,
 ) -> bool:
-    """tmux_send_line `inner`, wait `settle_s` for the agent to come up, then
-    sniff the pane for an unclaw flake. On flake, kill the session, recreate
-    it in `wt_str`, and retry up to `max_retries` more times. On success,
-    wires remote-control if cli supports it. Returns False if every attempt
-    flaked — helper kills the session before returning so caller cleanup
-    doesn't have to."""
+    """tmux_send_line `inner`, then poll the pane up to `settle_s` for an
+    unclaw flake (xpc tunnel timeout typically surfaces ~10-15s in). On
+    flake, kill the session, recreate it in `wt_str`, and retry up to
+    `max_retries` more times. On success, wires remote-control if cli
+    supports it. Returns False if every attempt flaked — helper kills the
+    session before returning so caller cleanup doesn't have to.
+
+    settle_s should be ≥18 when unclaw_wrap=True to outlast the tunnel
+    timeout; shorter values return False-success because the flake hasn't
+    rendered yet."""
+    POLL = 2
     for attempt in range(1 + max_retries):
         tmux_send_line(session, inner, host=host)
-        time.sleep(settle_s)
-        if not pane_unclaw_dead(session, host=host):
+        deadline = time.time() + settle_s
+        flaked = False
+        while time.time() < deadline:
+            time.sleep(POLL)
+            pane = tmux_capture(session, lines=200, host=host)
+            if UNCLAW_FLAKE_MARKER in pane:
+                flaked = True
+                break
+            if any(m in pane for m in AGENT_ALIVE_MARKERS):
+                break  # healthy spawn, no need to keep waiting
+        if not flaked:
             if cli is not None and cli.supports_remote_control():
                 ensure_remote_control(session, host=host)
             return True
@@ -869,6 +894,19 @@ def poll_running() -> None:
                     shutil.rmtree(WT_BASE / task / "target", ignore_errors=True)
             continue
         pane = tmux_capture(session, host=host)
+        # unclaw flake survived the spawn-time retry window: pane is alive
+        # but holds no agent (zsh prompt + xpc error). Kill it and let the
+        # next tick's normal dead-session handler re-resurrect.
+        if UNCLAW_FLAKE_MARKER in pane:
+            log(f"unclaw flake in live session: {task} — killing, next tick respawns")
+            tmux_kill(session, host=host)
+            pr_url = row.get("pr_url") or ""
+            if pr_url.startswith("https://"):
+                task_update(task, status="review", last_pr_hash="",
+                            last_error="unclaw flake")
+            else:
+                task_update(task, last_error="unclaw flake")
+            continue
         # No-action takes priority over DONE — worker may say "<<NODE_BOT_DONE>> ... flaky/unrelated/no code change",
         # which semantically means "nothing to do" not "ship this".
         if detect_no_action(pane):
@@ -1212,7 +1250,8 @@ def resurrect_no_pr(task: str, row: dict, host) -> bool:
     inner = cli.resume(sid, task)
     if host.unclaw_wrap:
         inner = f"unclaw run --name {BOT_USER} -- {inner}"
-    if not launch_with_retry(session, host, str(wt), inner, 6,
+    settle = 18 if host.unclaw_wrap else 6
+    if not launch_with_retry(session, host, str(wt), inner, settle,
                               f"resurrect {task}", cli=cli):
         log(f"resurrect {task}: will retry next tick (status stays running)")
         return True
@@ -1292,7 +1331,8 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         if host.unclaw_wrap:
             inner = f"unclaw run --name {BOT_USER} -- {inner}"
         cmd = f"{env_prefix}{inner}"
-        if not launch_with_retry(session, host, str(wt), cmd, 6,
+        settle = 18 if host.unclaw_wrap else 6
+        if not launch_with_retry(session, host, str(wt), cmd, settle,
                                   f"respawn {task} #{pr_num}", cli=cli):
             log(f"respawn {task}: bouncing to review for next-tick retry")
             task_update(task, status="review", last_pr_hash="",
@@ -1459,12 +1499,15 @@ def spawn_worker(task: str) -> None:
     if host.unclaw_wrap:
         launch = f"unclaw run --name {BOT_USER} -- {launch}"
     # Codex's MCP startup + trust-prompt rendering can take >8s; bump for non-claude.
-    settle = 8 if cli_name == "claude" else 14
+    # unclaw_wrap forces ≥18s so the xpc tunnel timeout surfaces before we exit settle.
+    settle = max(18 if host.unclaw_wrap else 0, 8 if cli_name == "claude" else 14)
     if not launch_with_retry(session, host, wt_str, launch, settle,
                               f"spawn {task}", cli=cli):
-        task_insert(task, status="failed", last_error="unclaw spawn flake",
-                    branch=branch, host=host.name, cli=cli_name, session_id=sid)
-        return
+        # Transient host issue (unclaw flake). Bubble up so main loop's
+        # try/except re-queues this task and bails the tick — otherwise the
+        # picker would keep grabbing fresh tasks and cascade-failing them
+        # all on the same broken host.
+        raise RuntimeError("unclaw spawn flake")
     # Answer any startup prompts (e.g. codex's "Do you trust this directory?").
     for k in cli.pre_prompt_keys():
         tmux_send_line(session, k, host=host)
