@@ -24,7 +24,7 @@ build_prefix = "nix develop -c"
 sccache = true
 sccache_dir = "~/.cache/sccache"
 sccache_cache_size = "60G"
-unclaw_wrap = true
+unclaw_wrap = false
 
 # Codex on the same mac mini, separate cli + cap so claude tokens don't bleed
 # into codex's quota and vice versa.
@@ -39,7 +39,7 @@ build_prefix = "nix develop -c"
 sccache  = true
 sccache_dir = "~/.cache/sccache"
 sccache_cache_size = "60G"
-unclaw_wrap = true
+unclaw_wrap = false
 
 # Example public-IP linux VM: bare cargo (no nix), shared sccache, unclaw-wrapped.
 # [[vm]]
