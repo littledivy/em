@@ -31,7 +31,7 @@ unclaw_wrap = false
 [[vm]]
 name     = "local-codex"
 host     = "localhost"
-capacity = 2
+capacity = 1
 clis     = ["codex"]
 wt_base  = "~/src/deno-wt"
 deno_src = "~/src/deno"
