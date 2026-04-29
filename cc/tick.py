@@ -179,12 +179,20 @@ def load_hosts() -> list[Host]:
         import tomllib  # py3.11+
     except ModuleNotFoundError:
         log("tomllib unavailable (need py3.11+); falling back to localhost-only")
-        return [Host(
-            name="localhost", ssh_host="localhost", user="", port=22, capacity=5,
-            clis=("claude",),
-            wt_base=str(WT_BASE), deno_src=str(DENO),
-            **_LOCAL_DEFAULTS,
-        )]
+        return [
+            Host(
+                name="localhost", ssh_host="localhost", user="", port=22, capacity=4,
+                clis=("claude",),
+                wt_base=str(WT_BASE), deno_src=str(DENO),
+                **_LOCAL_DEFAULTS,
+            ),
+            Host(
+                name="local-codex", ssh_host="localhost", user="", port=22, capacity=2,
+                clis=("codex",),
+                wt_base=str(WT_BASE), deno_src=str(DENO),
+                **_LOCAL_DEFAULTS,
+            ),
+        ]
     cfg_path = Path(__file__).parent / "vms.toml"
     if not cfg_path.exists():
         return [Host(
