@@ -69,13 +69,10 @@ VIEWER_URL = os.environ.get(
     "https://node-test-viewer.deno.dev/results/latest/darwin.json",
 )
 
-# Auto-picker filter is now minimal — workers can land Rust changes too. Only skip tests that
-# inherently require Node internals (--expose-internals, internal/...) which Deno doesn't expose.
-PICKER_SKIP_RE = re.compile(r"^(?!test-tls-|test-https-)")  # tls/https focus (operator)
-TEST_FILE_FLAG_SKIPS = (
-    "--expose-internals",
-    "internal/",
-)
+# Auto-picker filter — operator focus. Workers can land Rust changes for any
+# test, including ones that need --expose-internals / internal/ modules.
+PICKER_SKIP_RE = re.compile(r"^(?!test-http2-)")  # http2 focus (operator)
+TEST_FILE_FLAG_SKIPS: tuple[str, ...] = ()
 
 # Bot accounts to filter out of PR change-detection hash so they don't re-engage workers.
 BOT_LOGINS_RE = re.compile(
