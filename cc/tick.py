@@ -170,7 +170,7 @@ _LOCAL_DEFAULTS = dict(
     sccache=True,
     sccache_dir=str(Path.home() / ".cache/sccache"),
     sccache_cache_size="60G",
-    unclaw_wrap=False,
+    unclaw_wrap=True,
 )
 
 

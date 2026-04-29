@@ -23,7 +23,7 @@ build_prefix = "nix develop -c"
 sccache = true
 sccache_dir = "~/.cache/sccache"
 sccache_cache_size = "60G"
-unclaw_wrap = false
+unclaw_wrap = true
 
 # Example public-IP linux VM: bare cargo (no nix), shared sccache, unclaw-wrapped.
 # [[vm]]
@@ -48,7 +48,7 @@ name     = "bot0"
 host     = "vm.littledivy.com"
 user     = "bot0-linux"
 port     = 22
-capacity = 1
+capacity = 0
 clis     = ["codex"]
 wt_base  = "~/src/deno-wt"
 deno_src = "~/src/deno"
