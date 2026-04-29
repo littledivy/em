@@ -373,6 +373,50 @@ def tmux_clear_history(session: str, host: Host = LOCAL_HOST) -> None:
     t("clear-history", "-t", f"{session}:0.0", host=host)
 
 
+UNCLAW_FLAKE_MARKER = "tunnel activation failed or timed out"
+
+
+def pane_unclaw_dead(session: str, host: Host = LOCAL_HOST) -> bool:
+    """True if pane shows unclaw's xpc tunnel-activation flake. Symptom: unclaw
+    bails before exec'ing the agent, leaving zsh at a bare prompt; tmux session
+    stays alive but no claude/codex inside, so subsequent tmux_paste lands on
+    bash and chokes on heredoc syntax."""
+    return UNCLAW_FLAKE_MARKER in tmux_capture(session, lines=200, host=host)
+
+
+def launch_with_retry(
+    session: str,
+    host: "Host",
+    wt_str: str,
+    inner: str,
+    settle_s: int,
+    label: str,
+    cli=None,
+    max_retries: int = 1,
+) -> bool:
+    """tmux_send_line `inner`, wait `settle_s` for the agent to come up, then
+    sniff the pane for an unclaw flake. On flake, kill the session, recreate
+    it in `wt_str`, and retry up to `max_retries` more times. On success,
+    wires remote-control if cli supports it. Returns False if every attempt
+    flaked — helper kills the session before returning so caller cleanup
+    doesn't have to."""
+    for attempt in range(1 + max_retries):
+        tmux_send_line(session, inner, host=host)
+        time.sleep(settle_s)
+        if not pane_unclaw_dead(session, host=host):
+            if cli is not None and cli.supports_remote_control():
+                ensure_remote_control(session, host=host)
+            return True
+        log(f"unclaw flake on {label} (attempt {attempt+1}/{1+max_retries}); kill+restart")
+        tmux_kill(session, host=host)
+        time.sleep(3)
+        t("new-session", "-d", "-s", session, "-x", "200", "-y", "50",
+          "-c", wt_str, host=host)
+    log(f"unclaw flake persisted on {label}; giving up this tick")
+    tmux_kill(session, host=host)
+    return False
+
+
 def ensure_remote_control(session: str, attempts: int = 4, host: Host = LOCAL_HOST) -> bool:
     """Send /remote-control and verify it took (claude only).
     No-op for non-claude CLIs since they have no equivalent."""
@@ -1168,10 +1212,10 @@ def resurrect_no_pr(task: str, row: dict, host) -> bool:
     inner = cli.resume(sid, task)
     if host.unclaw_wrap:
         inner = f"unclaw run --name {BOT_USER} -- {inner}"
-    tmux_send_line(session, inner, host=host)
-    time.sleep(6)
-    if cli.supports_remote_control():
-        ensure_remote_control(session, host=host)
+    if not launch_with_retry(session, host, str(wt), inner, 6,
+                              f"resurrect {task}", cli=cli):
+        log(f"resurrect {task}: will retry next tick (status stays running)")
+        return True
     tmux_clear_history(session, host=host)
     nudge = (
         f"Host crashed; resumed in fresh pane, same worktree. "
@@ -1248,10 +1292,12 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         if host.unclaw_wrap:
             inner = f"unclaw run --name {BOT_USER} -- {inner}"
         cmd = f"{env_prefix}{inner}"
-        tmux_send_line(session, cmd, host=host)
-        time.sleep(6)
-        if cli.supports_remote_control():
-            ensure_remote_control(session, host=host)
+        if not launch_with_retry(session, host, str(wt), cmd, 6,
+                                  f"respawn {task} #{pr_num}", cli=cli):
+            log(f"respawn {task}: bouncing to review for next-tick retry")
+            task_update(task, status="review", last_pr_hash="",
+                        last_error="unclaw flake")
+            return
         tmux_clear_history(session, host=host)
 
     push_remote = "origin" if task.startswith("unclaw:") else "bot"
@@ -1412,11 +1458,13 @@ def spawn_worker(task: str) -> None:
     launch = cli.launch(sid, task)
     if host.unclaw_wrap:
         launch = f"unclaw run --name {BOT_USER} -- {launch}"
-    tmux_send_line(session, launch, host=host)
     # Codex's MCP startup + trust-prompt rendering can take >8s; bump for non-claude.
-    time.sleep(8 if cli_name == "claude" else 14)
-    if cli.supports_remote_control():
-        ensure_remote_control(session, host=host)
+    settle = 8 if cli_name == "claude" else 14
+    if not launch_with_retry(session, host, wt_str, launch, settle,
+                              f"spawn {task}", cli=cli):
+        task_insert(task, status="failed", last_error="unclaw spawn flake",
+                    branch=branch, host=host.name, cli=cli_name, session_id=sid)
+        return
     # Answer any startup prompts (e.g. codex's "Do you trust this directory?").
     for k in cli.pre_prompt_keys():
         tmux_send_line(session, k, host=host)
