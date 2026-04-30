@@ -71,7 +71,7 @@ VIEWER_URL = os.environ.get(
 
 # Auto-picker filter — operator focus. Workers can land Rust changes for any
 # test, including ones that need --expose-internals / internal/ modules.
-PICKER_SKIP_RE = re.compile(r"^(?!test-http2-)")  # http2 focus (operator)
+PICKER_SKIP_RE = re.compile(r"^(?!test-crypto-)")  # crypto focus (operator)
 TEST_FILE_FLAG_SKIPS: tuple[str, ...] = ()
 
 # Bot accounts to filter out of PR change-detection hash so they don't re-engage workers.
