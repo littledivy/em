@@ -456,13 +456,24 @@ def tmux_list_unc_sessions() -> list[str]:
 
 
 def session_for_dn(task: str) -> str:
-    """Mirror tick.sh's `dn-` session naming (truncated to 32 chars after prefix)."""
-    cleaned = re.sub(r"[^A-Za-z0-9-]", "-", task)[:32]
+    """Mirror tick.sh's `dn-` session naming. Capped at 32 chars after the
+    prefix for tmux readability; if the task name is longer, append a 6-char
+    hash so two tasks sharing a 32-char prefix don't collide on the same
+    session (would let poll_running confuse them and cause infinite resurrect)."""
+    cleaned = re.sub(r"[^A-Za-z0-9-]", "-", task)
+    if len(cleaned) > 32:
+        import hashlib
+        h = hashlib.sha1(cleaned.encode()).hexdigest()[:6]
+        cleaned = cleaned[:25] + "-" + h
     return f"dn-{cleaned}"
 
 
 def session_for_unc(slug: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9-]", "-", slug)[:32]
+    cleaned = re.sub(r"[^A-Za-z0-9-]", "-", slug)
+    if len(cleaned) > 32:
+        import hashlib
+        h = hashlib.sha1(cleaned.encode()).hexdigest()[:6]
+        cleaned = cleaned[:25] + "-" + h
     return f"unc-{cleaned}"
 
 
