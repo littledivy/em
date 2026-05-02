@@ -61,7 +61,7 @@ SCCACHE_CACHE_SIZE = "60G"
 REMOTE_SOCKET = "/tmp/claude-tmux-sockets/deno-bot.sock"
 
 CONCURRENT_CAP = 5
-OPEN_PR_CAP = 15  # max PRs currently open (review/monitoring); merged/closed free a slot
+OPEN_PR_CAP = 25  # max PRs currently open (review/monitoring); merged/closed free a slot
 ATTEMPTS_CAP = 5
 IDLE_TICKS_CAP = 4
 
@@ -72,7 +72,7 @@ VIEWER_URL = os.environ.get(
 
 # Auto-picker filter — operator focus. Workers can land Rust changes for any
 # test, including ones that need --expose-internals / internal/ modules.
-PICKER_SKIP_RE = re.compile(r"^(?!test-crypto-)")  # crypto focus (operator)
+PICKER_SKIP_RE = re.compile(r"^(?!test-http2-)")  # http2 focus (operator)
 TEST_FILE_FLAG_SKIPS: tuple[str, ...] = ()
 
 # Bot accounts to filter out of PR change-detection hash so they don't re-engage workers.
