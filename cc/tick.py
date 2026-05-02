@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -528,6 +529,46 @@ def db_init() -> None:
                 c.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # column already exists
+
+
+def sweep_orphan_workers() -> None:
+    """Kill leaked deno test-runner children left behind after a worker
+    session was killed. cargo test's node_compat runner spawns child deno
+    processes (test-vm-sigint, test-cluster-primary-*, test-dgram-*) that
+    aren't in cargo's process group; when the tmux pane dies, they get
+    reparented to init and run forever. We saw 24 sigint loops at ~25% CPU
+    each cooking the host on 2026-05-02."""
+    try:
+        ps = subprocess.run(
+            ["ps", "-eo", "pid,ppid,command"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return
+    pids: list[int] = []
+    for line in ps.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        cmd = parts[2]
+        if ppid != 1:
+            continue
+        if "/deno-wt/" not in cmd or "/target/debug/deno run" not in cmd:
+            continue
+        pids.append(pid)
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    log(f"orphan-sweep: killed {len(pids)} deno test-runner orphan(s)")
 
 
 def task_get(task_id: str) -> dict | None:
@@ -1546,6 +1587,8 @@ def tick() -> None:
     LOGS.mkdir(parents=True, exist_ok=True)
     INBOX.mkdir(parents=True, exist_ok=True)
     WT_BASE.mkdir(parents=True, exist_ok=True)
+
+    sweep_orphan_workers()
 
     # Per-host sccache: every host shares one S3-style cache (MinIO at
     # sccache.littledivy.com). Creds live in ~/.deno-bot/sccache.env (not
