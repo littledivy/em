@@ -16,7 +16,7 @@
 [[vm]]
 name     = "localhost"
 host     = "localhost"
-capacity = 4
+capacity = 6
 clis     = ["claude"]
 wt_base = "~/src/deno-wt"
 deno_src = "~/src/deno"
@@ -31,7 +31,7 @@ unclaw_wrap = false
 [[vm]]
 name     = "local-codex"
 host     = "localhost"
-capacity = 1
+capacity = 2
 clis     = ["codex"]
 wt_base  = "~/src/deno-wt"
 deno_src = "~/src/deno"
