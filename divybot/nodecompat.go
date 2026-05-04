@@ -200,13 +200,12 @@ func (s *NodeCompatSource) Setup(taskName string) error {
 	wt := s.WorktreeDir(taskName)
 	branch := "claude/" + taskName
 
-	// Fetch + create worktree
-	sh(s.cfg.DenoSrc, nil, "git", "fetch", "origin", "main", "--quiet") //nolint
-	add, err := sh(s.cfg.DenoSrc, nil, "git", "worktree", "add", "-B", branch, wt, "origin/main")
-	if err != nil {
-		// May already exist — try attaching
-		if _, err2 := sh(s.cfg.DenoSrc, nil, "git", "worktree", "add", wt, branch); err2 != nil {
-			return fmt.Errorf("worktree add: %s / %v", add, err)
+	if _, err := os.Stat(wt); os.IsNotExist(err) {
+		// Worktree doesn't exist — create it.
+		sh(s.cfg.DenoSrc, nil, "git", "fetch", "origin", "main", "--quiet") //nolint
+		add, err := sh(s.cfg.DenoSrc, nil, "git", "worktree", "add", "-B", branch, wt, "origin/main")
+		if err != nil {
+			return fmt.Errorf("worktree add: %v", add)
 		}
 	}
 
