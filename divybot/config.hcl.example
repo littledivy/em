@@ -10,7 +10,7 @@ fleet {
 timing {
   worker_poll_s       = 20    # how often to check tmux panes for sentinels
   pr_poll_s           = 180   # how often to poll GitHub PR state
-  feedback_cooldown_s = 1800  # min seconds between respawns of same PR
+  feedback_cooldown_s = 600   # min seconds between respawns of same PR
   idle_ticks_cap      = 4     # kill worker after N idle polls with no pane change
   open_pr_cap         = 25    # don't spawn if this many PRs are open/in-review
 }

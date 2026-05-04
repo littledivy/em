@@ -54,7 +54,7 @@ var (
 	defaultTiming = TimingConfig{
 		WorkerPollS:       20,
 		PRPollS:           180,
-		FeedbackCooldownS: 1800,
+		FeedbackCooldownS: 600,
 		IdleTicksCap:      4,
 		OpenPRCap:         25,
 	}

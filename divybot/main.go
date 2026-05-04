@@ -171,6 +171,7 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 		if total >= d.cfg.TotalCapacity() {
 			return
 		}
+		picked := false
 		for _, src := range d.sources {
 			task := src.Pick(d.db)
 			if task == "" {
@@ -180,7 +181,12 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 			if err := d.spawnWorker(taskID); err != nil {
 				log.Printf("spawn %s: %v", taskID, err)
 			}
-			return
+			picked = true
+			break
+		}
+		if !picked {
+			free := d.cfg.TotalCapacity() - total
+			log.Printf("idle: %d/%d slots free, no tasks available", free, d.cfg.TotalCapacity())
 		}
 	}
 	for {
@@ -337,14 +343,24 @@ func (d *Daemon) pollPRs() {
 		}
 
 		if sig.Hash == t.LastPRHash {
-			if t.Status == "review" && sig.Counts.Fail+sig.Counts.Comments+sig.Counts.Reviews+sig.Counts.Inline == 0 {
-				log.Printf("no-signal: %s", t.ID)
-			}
 			continue
 		}
 
+		// Hash changed — always record it so we don't re-process same state.
+		d.db.Update(t.ID, map[string]any{"last_pr_hash": sig.Hash})
+
+		c := sig.Counts
+		actionable := c.Fail > 0 || c.Comments > 0 || c.Reviews > 0 || c.Inline > 0 || c.Conflict > 0
+		if !actionable {
+			log.Printf("no-signal (hash changed, all counts zero): %s", t.ID)
+			continue
+		}
+
+		// Merge conflict: bypass cooldown — needs immediate attention
+		urgent := c.Conflict > 0
+
 		// Feedback cooldown
-		if t.LastFeedbackAt > 0 {
+		if !urgent && t.LastFeedbackAt > 0 {
 			elapsed := time.Since(time.Unix(t.LastFeedbackAt, 0))
 			if elapsed < d.cfg.FeedbackCooldown() {
 				log.Printf("cooldown (%v remain): %s", (d.cfg.FeedbackCooldown() - elapsed).Round(time.Second), t.ID)
@@ -352,22 +368,13 @@ func (d *Daemon) pollPRs() {
 			}
 		}
 
-		d.db.Update(t.ID, map[string]any{"last_pr_hash": sig.Hash})
-
-		// Baseline: first hash, nothing actionable → just store
-		if t.LastPRHash == "" && sig.Counts.Fail == 0 && sig.Counts.Comments == 0 &&
-			sig.Counts.Reviews == 0 && sig.Counts.Inline == 0 && sig.Counts.Conflict == 0 {
-			log.Printf("baseline clean: %s", t.ID)
-			continue
-		}
-
 		// Live worker: paste an update instead of respawning
 		if t.Status == "running" {
 			session := sessionFor(t.ID)
 			if tmuxHasSession(session) {
 				msg := fmt.Sprintf(
-					"PR #%s has new activity: fail=%d cmt=%d rev=%d inline=%d. Address alongside current work, then `<<NODE_BOT_DONE>> <summary>`.",
-					prNum, sig.Counts.Fail, sig.Counts.Comments, sig.Counts.Reviews, sig.Counts.Inline,
+					"PR #%s has new activity: fail=%d cmt=%d rev=%d inline=%d conflict=%d. Address alongside current work, then `<<NODE_BOT_DONE>> <summary>`.",
+					prNum, c.Fail, c.Comments, c.Reviews, c.Inline, c.Conflict,
 				)
 				tmuxPaste(session, msg)
 				d.db.Update(t.ID, map[string]any{"last_feedback_at": time.Now().Unix()})
@@ -376,7 +383,7 @@ func (d *Daemon) pollPRs() {
 			}
 		}
 
-		d.respawnForFeedback(t, prNum, sig.Counts)
+		d.respawnForFeedback(t, prNum, c)
 	}
 }
 
