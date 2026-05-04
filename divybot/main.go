@@ -604,8 +604,17 @@ func sh(dir string, env []string, args ...string) (string, error) {
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	return strings.TrimSpace(string(out)), err
+	if err != nil {
+		se := strings.TrimSpace(stderr.String())
+		if se != "" {
+			return strings.TrimSpace(string(out)), fmt.Errorf("%w: %s", err, se)
+		}
+		return strings.TrimSpace(string(out)), err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func ghToken(user string) (string, error) {
