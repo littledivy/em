@@ -356,8 +356,8 @@ func (d *Daemon) pollPRs() {
 			continue
 		}
 
-		// Merge conflict: bypass cooldown — needs immediate attention
-		urgent := c.Conflict > 0
+		// Merge conflict or red CI: bypass cooldown — needs immediate attention
+		urgent := c.Conflict > 0 || c.Fail > 0
 
 		// Feedback cooldown
 		if !urgent && t.LastFeedbackAt > 0 {
