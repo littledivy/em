@@ -95,13 +95,13 @@ func tailLines(pane string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-func detectDone(pane string) bool     { return reDone.MatchString(tailLines(pane, 80)) }
-func detectEscalate(pane string) bool { return reEscalate.MatchString(tailLines(pane, 80)) }
+func detectDone(pane string) bool     { return reDone.MatchString(tailLines(pane, 10)) }
+func detectEscalate(pane string) bool { return reEscalate.MatchString(tailLines(pane, 10)) }
 func detectNoAction(pane string) bool { return reNoAction.MatchString(tailLines(pane, 20)) }
 
 func extractTitle(pane string) string {
 	var last string
-	for _, line := range strings.Split(tailLines(pane, 80), "\n") {
+	for _, line := range strings.Split(tailLines(pane, 10), "\n") {
 		if m := reDoneTitle.FindStringSubmatch(line); m != nil {
 			t := strings.TrimRight(m[1], ".")
 			if len(t) > 8 {
