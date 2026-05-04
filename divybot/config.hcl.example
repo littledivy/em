@@ -1,0 +1,27 @@
+# ~/.divybot/config.hcl
+# All fields optional — defaults work out of the box.
+
+fleet {
+  claude = 8
+  codex  = 0   # bump to 4 when new codex plan is active
+  gemini = 0
+}
+
+timing {
+  worker_poll_s       = 20    # how often to check tmux panes for sentinels
+  pr_poll_s           = 180   # how often to poll GitHub PR state
+  feedback_cooldown_s = 1800  # min seconds between respawns of same PR
+  idle_ticks_cap      = 4     # kill worker after N idle polls with no pane change
+  open_pr_cap         = 25    # don't spawn if this many PRs are open/in-review
+}
+
+source "nodecompat" {
+  upstream_repo = "denoland/deno"
+  bot_user      = "divybot"
+  bot_fork      = "divybot/deno"
+  deno_src      = "~/src/deno"
+  wt_base       = "~/src/deno-wt"
+  build_prefix  = "nix develop -c"
+  picker_focus  = "^test-crypto-"  # regex filter; empty = pick any failing test
+  viewer_url    = "https://node-test-viewer.deno.dev/results/latest/darwin.json"
+}
