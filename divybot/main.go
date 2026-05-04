@@ -229,6 +229,14 @@ func (d *Daemon) pollWorkers(trigger func()) {
 
 		pane := tmuxCapture(session, 500)
 
+		// First poll: pane may still show the pasted prompt (which contains sentinel
+		// examples). Record hash and skip detection — second poll is safe.
+		if t.LastHash == "" {
+			d.db.Update(t.ID, map[string]any{"last_hash": hashLines(pane, 50)})
+			log.Printf("first poll (grace): %s", t.ID)
+			continue
+		}
+
 		switch {
 		case detectNoAction(pane):
 			log.Printf("no-action → review: %s", t.ID)
