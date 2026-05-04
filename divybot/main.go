@@ -242,7 +242,8 @@ func (d *Daemon) pollWorkers(trigger func()) {
 			trigger()
 
 		case detectEscalate(pane):
-			log.Printf("ESCALATE: %s", t.ID)
+			reason := tailLines(pane, 5)
+			log.Printf("ESCALATE: %s\n%s", t.ID, reason)
 			d.db.Update(t.ID, map[string]any{"status": "abandoned", "last_error": "escalated"})
 			tmuxKill(session)
 			// no trigger — let 30s tick spawn next; avoids storm when many tasks escalate rapidly
