@@ -112,11 +112,12 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go d.runWorkerPoller(ctx, &wg, trigger)
 	go d.runPRMonitor(ctx, &wg)
 	go d.runSpawner(ctx, &wg, slots)
 	go d.runInboxDeliverer(ctx, &wg)
+	go d.runWorktreeSweeper(ctx, &wg)
 	log.Printf("divybot started (root=%s)", root)
 	wg.Wait()
 }
@@ -211,6 +212,56 @@ func (d *Daemon) runInboxDeliverer(ctx context.Context, wg *sync.WaitGroup) {
 			return
 		case <-tick.C:
 			d.deliverInbox()
+		}
+	}
+}
+
+// ── Worktree sweeper ─────────────────────────────────────────────────────────
+
+func (d *Daemon) runWorktreeSweeper(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+	d.sweepWorktrees() // run immediately on startup
+	tick := time.NewTicker(1 * time.Hour)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			d.sweepWorktrees()
+		}
+	}
+}
+
+// WorktreeSweeper is an optional interface sources implement to enable cleanup.
+type WorktreeSweeper interface {
+	WorktreeBase() string // directory containing per-task worktree subdirs
+	MainRepo() string     // path to main git repo for "git worktree remove"
+}
+
+func (d *Daemon) sweepWorktrees() {
+	keep := map[string]bool{}
+	for _, t := range d.db.WithStatuses("running", "review", "failed") {
+		keep[taskName(t.ID)] = true
+	}
+	for _, src := range d.sources {
+		sw, ok := src.(WorktreeSweeper)
+		if !ok {
+			continue
+		}
+		base := sw.WorktreeBase()
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if keep[e.Name()] {
+				continue
+			}
+			wt := filepath.Join(base, e.Name())
+			sh(sw.MainRepo(), nil, "git", "worktree", "remove", "--force", wt) //nolint
+			os.RemoveAll(wt)
+			log.Printf("swept worktree: %s", e.Name())
 		}
 	}
 }

@@ -68,7 +68,9 @@ func (s *NodeCompatSource) loadTemplates() {
 	s.feedTmpl = string(fb)
 }
 
-func (s *NodeCompatSource) ID() string { return "nodecompat" }
+func (s *NodeCompatSource) ID() string             { return "nodecompat" }
+func (s *NodeCompatSource) WorktreeBase() string   { return s.cfg.WTBase }
+func (s *NodeCompatSource) MainRepo() string       { return s.cfg.DenoSrc }
 
 func (s *NodeCompatSource) Configure(body hcl.Body) error {
 	var cfg NodeCompatConfig
