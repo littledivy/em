@@ -94,14 +94,15 @@ func (s *NodeCompatSource) Configure(body hcl.Body) error {
 	if cfg.BuildPrefix != "" {
 		s.cfg.BuildPrefix = cfg.BuildPrefix
 	}
-	if cfg.PickerFocus != "" {
-		s.cfg.PickerFocus = cfg.PickerFocus
-	}
+	// Always override PickerFocus — empty string means no filter
+	s.cfg.PickerFocus = cfg.PickerFocus
 	if cfg.ViewerURL != "" {
 		s.cfg.ViewerURL = cfg.ViewerURL
 	}
 	if s.cfg.PickerFocus != "" {
 		s.skipRE = regexp.MustCompile(s.cfg.PickerFocus)
+	} else {
+		s.skipRE = nil
 	}
 	return nil
 }
