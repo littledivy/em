@@ -52,7 +52,7 @@ bash "$HERE/trust.sh" "$WT" || true
 # Kill any prior session, spawn fresh
 T kill-session -t "$SESSION" 2>/dev/null || true
 T new-session -d -s "$SESSION" -x 200 -y 50 -c "$WT"
-T send-keys -t "$SESSION":0.0 -- "/Users/divy/.npm-packages/bin/claude --permission-mode bypassPermissions -n 'unclaw:$SLUG'" Enter
+T send-keys -t "$SESSION":0.0 -- "/Users/divy/.npm-packages/bin/claude --permission-mode bypassPermissions --model sonnet -n 'unclaw:$SLUG'" Enter
 sleep 8
 T send-keys -t "$SESSION":0.0 -- "/remote-control" Enter
 sleep 3

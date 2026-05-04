@@ -37,12 +37,10 @@ class CliAdapter:
 
 class ClaudeAdapter(CliAdapter):
     def launch(self, sid: str, task: str) -> str:
-        # Pin new spawns to sonnet (operator preference — cheaper than opus,
-        # fast enough for these node-compat fixes). Use the `sonnet` alias
-        # rather than a versioned id — the CLI rejects non-existent ids
+        # Pin every spawn (and resume) to sonnet (operator preference — cheaper
+        # than opus, fast enough for these node-compat fixes). Use the `sonnet`
+        # alias rather than a versioned id — the CLI rejects non-existent ids
         # (we hit this with `claude-sonnet-4-7` which isn't a real model).
-        # Resume deliberately doesn't pin a model so existing sessions keep
-        # whatever they started with.
         return (
             f"{self.bin} --session-id {sid} --permission-mode bypassPermissions "
             f"--model sonnet "
@@ -52,6 +50,7 @@ class ClaudeAdapter(CliAdapter):
     def resume(self, sid: str, task: str) -> str | None:
         return (
             f"{self.bin} --resume {sid} --permission-mode bypassPermissions "
+            f"--model sonnet "
             f"-n 'deno-bot:{task}'"
         )
 

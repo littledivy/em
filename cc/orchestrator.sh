@@ -11,7 +11,8 @@ while true; do
   echo "=== launching claude orchestrator $(date +%H:%M:%S) using $CLAUDE_BIN ==="
   "$CLAUDE_BIN" remote-control \
     --name "deno-bot:orchestrator" \
-    --permission-mode bypassPermissions
+    --permission-mode bypassPermissions \
+    --model sonnet
   rc=$?
   echo "claude exited rc=$rc — restart in 30s (Ctrl-C to stop)"
   sleep 30

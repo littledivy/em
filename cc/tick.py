@@ -889,14 +889,17 @@ def post_worker(task: str) -> None:
     # Clear last_pr_hash only when we actually pushed new commits — otherwise
     # review-poll sees a "fresh" PR each tick and re-fires feedback even when
     # nothing changed (workers loop on DONE→push-noop→respawn→DONE forever).
+    # Clear session_id too: future feedback respawns get a fresh launch with
+    # PR-only context (prompt-feedback.md) instead of --resume of the
+    # initial-build conversation.
     if has_uncommitted:
-        task_update(task, status="review", pr_url=pr_url, last_pr_hash="")
+        task_update(task, status="review", pr_url=pr_url, last_pr_hash="", session_id="")
     else:
-        task_update(task, status="review", pr_url=pr_url)
+        task_update(task, status="review", pr_url=pr_url, session_id="")
     tmux_kill(session, host=host)
     if host.is_local:
         shutil.rmtree(wt / "target", ignore_errors=True)
-    log(f"PR opened, session killed; review-poll handles CI/comments/conflicts: {task}")
+    log(f"PR opened, session killed + sid cleared; review-poll respawns fresh: {task}")
 
 
 # ── poll loops ────────────────────────────────────────────────────────────────
@@ -1322,12 +1325,24 @@ def resurrect_no_pr(task: str, row: dict, host) -> bool:
 
 
 def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[str, int]) -> None:
-    """Resume the worker session and paste a feedback checklist."""
+    """Resume the worker session and paste a feedback checklist.
+
+    PR-only mode: at PR-open we clear session_id, so the first respawn after
+    PR-open fires a fresh claude session and pastes prompt-feedback.md (full
+    PR bootstrap, no initial-build context carried over). Subsequent respawns
+    of that fresh session use --resume + brief nudge as before. Unclaw keeps
+    its legacy --continue fallback.
+    """
     from cli_adapters import adapter_for
+    import uuid as _uuid
     row = task_get(task) or {}
     host = host_for_task(row)
     cli_name = row.get("cli") or "claude"
     sid = row.get("session_id") or ""
+    is_unclaw = task.startswith("unclaw:")
+    # PR-only mode: fire only when we actually start a fresh session below.
+    fresh_launch_intended = (not sid) and not is_unclaw and cli_name == "claude"
+    fresh_launched = False
 
     if task.startswith("unclaw:"):
         slug = task.removeprefix("unclaw:")
@@ -1371,12 +1386,19 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
             if cli_name == "claude":
                 trust_worktree_remote(host, str(wt))
         t("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", str(wt), host=host)
-        # Prefer cli-specific resume; fall back to cli.launch for clis that don't resume.
-        resume_cmd = cli.resume(sid, task) if sid else None
-        if resume_cmd is None and cli_name == "claude":
-            # legacy claude with no session_id stored: --continue picks last in cwd
-            resume_cmd = f"{cli.bin} --continue --permission-mode bypassPermissions -n '{worker_name}'"
-        inner = resume_cmd or cli.launch(sid, task)
+        if fresh_launch_intended:
+            # PR-open cleared session_id → start a brand-new claude session.
+            # Persist the new sid only if the launch sticks (avoid stale sids
+            # on flake-then-retry where no real session was ever registered).
+            new_sid = str(_uuid.uuid4())
+            inner = cli.launch(new_sid, task)
+        else:
+            # Prefer cli-specific resume; fall back to cli.launch for clis that don't resume.
+            resume_cmd = cli.resume(sid, task) if sid else None
+            if resume_cmd is None and cli_name == "claude":
+                # unclaw / legacy claude with no sid: --continue picks last in cwd
+                resume_cmd = f"{cli.bin} --continue --permission-mode bypassPermissions --model sonnet -n '{worker_name}'"
+            inner = resume_cmd or cli.launch(sid, task)
         if host.unclaw_wrap:
             inner = f"unclaw run --name {BOT_USER} -- {inner}"
         cmd = f"{env_prefix}{inner}"
@@ -1387,25 +1409,53 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
             task_update(task, status="review", last_pr_hash="",
                         last_error="unclaw flake")
             return
+        if fresh_launch_intended:
+            task_update(task, session_id=new_sid)
+            sid = new_sid
+            fresh_launched = True
         tmux_clear_history(session, host=host)
 
-    push_remote = "origin" if task.startswith("unclaw:") else "bot"
-    # Slim nudge — gh cmd hints, HEREDOC commit example, trailer instruction
-    # all live in prompt.md and the worker already has them. Just signal what
-    # changed and the counts; let the worker drive. Saves ~1.3 KB per respawn.
-    suffix = f"  ⚠️ MERGE CONFLICT — `git fetch origin && git rebase origin/main` then `git push {push_remote} HEAD --force-with-lease`." if counts.get("conflict") else ""
-    fb = (
-        f"PR #{pr_num} has new activity (counts: fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}). "
-        f"Address everything per prompt.md, push, then `<<NODE_BOT_DONE>> <one-line summary>`."
-        f"{suffix}"
-    )
+    push_remote = "origin" if is_unclaw else "bot"
+    if fresh_launched:
+        # PR-only context: full bootstrap from prompt-feedback.md. The fresh
+        # session has zero memory of the original build, so the prompt walks
+        # the worker through reading the PR, addressing everything, pushing.
+        prompt_template = (Path(__file__).parent / "prompt-feedback.md").read_text()
+        conflict_line = (
+            "MERGE CONFLICT detected — start with `git fetch origin && git rebase origin/main`, "
+            f"then `git push {push_remote} HEAD --force-with-lease`."
+            if counts.get("conflict") else ""
+        )
+        fb = (
+            prompt_template
+            .replace("<NAME>", task)
+            .replace("<PR>", str(pr_num))
+            .replace("<BRANCH>", row.get("branch") or "")
+            .replace("<PUSH_REMOTE>", push_remote)
+            .replace("{{BUILD_PREFIX}}", host.build_prefix)
+            .replace("<FAIL>", str(counts['fail']))
+            .replace("<CMT>", str(counts['comments']))
+            .replace("<REV>", str(counts['reviews']))
+            .replace("<INLINE>", str(counts['inline']))
+            .replace("<CONFLICT_LINE>", conflict_line)
+        )
+    else:
+        # Slim nudge — gh cmd hints, HEREDOC commit example, trailer instruction
+        # all live in prompt.md and the resumed session already has them.
+        suffix = f"  ⚠️ MERGE CONFLICT — `git fetch origin && git rebase origin/main` then `git push {push_remote} HEAD --force-with-lease`." if counts.get("conflict") else ""
+        fb = (
+            f"PR #{pr_num} has new activity (counts: fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}). "
+            f"Address everything per prompt.md, push, then `<<NODE_BOT_DONE>> <one-line summary>`."
+            f"{suffix}"
+        )
     tmux_paste(session, fb, host=host)
     with db() as c:
         c.execute(
             "UPDATE tasks SET status='running', attempts=attempts+1, updated_at=? WHERE id=?",
             (int(time.time()), task),
         )
-    log(f"fed back: {task} ({pr_num}) — fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}")
+    mode = "fresh-launch" if fresh_launched else "resume"
+    log(f"fed back ({mode}): {task} ({pr_num}) — fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}")
 
 
 # ── picker + spawn ────────────────────────────────────────────────────────────
