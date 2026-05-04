@@ -283,12 +283,19 @@ func (d *Daemon) pollWorkers(trigger func()) {
 }
 
 func (d *Daemon) handleDone(t Task, pane string) {
+	tmuxKill(sessionFor(t.ID))
+	if t.PRURL != "" {
+		// Feedback session: worker committed/pushed itself per prompt instructions.
+		// Just return to review so PR monitor picks up CI results.
+		d.db.Update(t.ID, map[string]any{"status": "review", "last_pr_hash": "", "session_id": ""})
+		log.Printf("feedback done → review: %s", t.ID)
+		return
+	}
 	src := d.sourceFor(t.ID)
 	if src == nil {
 		return
 	}
 	prURL, err := src.PostDone(taskName(t.ID), pane)
-	tmuxKill(sessionFor(t.ID))
 	if err != nil {
 		log.Printf("postDone %s: %v", t.ID, err)
 		d.db.Update(t.ID, map[string]any{"status": "failed", "last_error": err.Error()})
