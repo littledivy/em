@@ -131,8 +131,8 @@ func (s *NodeCompatSource) Pick(db *DB) string {
 		if strings.Contains(configText, `"parallel/`+name+`.js"`) {
 			return false
 		}
-		if t := db.Get("nodecompat:" + name); t != nil && t.Status != "failed" && t.Status != "abandoned" {
-			return false
+		if t := db.Get("nodecompat:" + name); t != nil && t.Status != "failed" {
+			return false // abandoned = permanent; only retry "failed" (session died / idle)
 		}
 		return true
 	}

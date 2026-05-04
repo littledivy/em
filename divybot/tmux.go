@@ -24,7 +24,8 @@ func initTmux() {
 	if _, err := os.Stat(tmuxBin); err != nil {
 		tmuxBin = "tmux" // fallback to PATH
 	}
-	socketDir = filepath.Join(os.Getenv("TMPDIR"), "divybot-sockets")
+	// Use /tmp (not $TMPDIR) — stable path, survives re-login, viewer can hard-code it.
+	socketDir = "/tmp/divybot-sockets"
 	socket = filepath.Join(socketDir, "divybot.sock")
 	os.MkdirAll(socketDir, 0755)
 }

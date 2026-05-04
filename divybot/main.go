@@ -245,7 +245,7 @@ func (d *Daemon) pollWorkers(trigger func()) {
 			log.Printf("ESCALATE: %s", t.ID)
 			d.db.Update(t.ID, map[string]any{"status": "abandoned", "last_error": "escalated"})
 			tmuxKill(session)
-			trigger()
+			// no trigger — let 30s tick spawn next; avoids storm when many tasks escalate rapidly
 
 		default:
 			h := hashLines(pane, 50)
