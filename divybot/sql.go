@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	last_pr_hash     TEXT,
 	last_error       TEXT,
 	last_feedback_at INTEGER,
+	pending_feedback INTEGER NOT NULL DEFAULT 0,
 	created_at       INTEGER NOT NULL,
 	updated_at       INTEGER NOT NULL
 );
@@ -32,20 +33,21 @@ CREATE INDEX IF NOT EXISTS idx_status ON tasks(status);
 
 // Task mirrors a row in the tasks table.
 type Task struct {
-	ID             string
-	Status         string
-	CLI            string
-	SessionID      string
-	PRURL          string
-	Branch         string
-	Attempts       int
-	IdleTicks      int
-	LastHash       string
-	LastPRHash     string
-	LastError      string
-	LastFeedbackAt int64
-	CreatedAt      int64
-	UpdatedAt      int64
+	ID              string
+	Status          string
+	CLI             string
+	SessionID       string
+	PRURL           string
+	Branch          string
+	Attempts        int
+	IdleTicks       int
+	LastHash        string
+	LastPRHash      string
+	LastError       string
+	LastFeedbackAt  int64
+	PendingFeedback bool
+	CreatedAt       int64
+	UpdatedAt       int64
 }
 
 // DB wraps a sqlite connection.
@@ -59,6 +61,8 @@ func mustOpenDB(path string) *DB {
 	if _, err := conn.Exec(schema); err != nil {
 		log.Fatalf("init schema: %v", err)
 	}
+	// Migrate: add columns introduced after initial schema.
+	conn.Exec(`ALTER TABLE tasks ADD COLUMN pending_feedback INTEGER NOT NULL DEFAULT 0`) //nolint
 	return &DB{conn}
 }
 
@@ -68,10 +72,11 @@ func (db *DB) scan(row *sql.Row) *Task {
 	t := &Task{}
 	var sid, prURL, branch, lastHash, lastPRHash, lastErr sql.NullString
 	var lastFeedback sql.NullInt64
+	var pendingFeedback int
 	err := row.Scan(
 		&t.ID, &t.Status, &t.CLI, &sid, &prURL, &branch,
 		&t.Attempts, &t.IdleTicks, &lastHash, &lastPRHash,
-		&lastErr, &lastFeedback, &t.CreatedAt, &t.UpdatedAt,
+		&lastErr, &lastFeedback, &pendingFeedback, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {
 		return nil
@@ -83,10 +88,11 @@ func (db *DB) scan(row *sql.Row) *Task {
 	t.LastPRHash = lastPRHash.String
 	t.LastError = lastErr.String
 	t.LastFeedbackAt = lastFeedback.Int64
+	t.PendingFeedback = pendingFeedback != 0
 	return t
 }
 
-const taskCols = `id,status,cli,session_id,pr_url,branch,attempts,idle_ticks,last_hash,last_pr_hash,last_error,last_feedback_at,created_at,updated_at`
+const taskCols = `id,status,cli,session_id,pr_url,branch,attempts,idle_ticks,last_hash,last_pr_hash,last_error,last_feedback_at,pending_feedback,created_at,updated_at`
 
 func (db *DB) Get(id string) *Task {
 	row := db.conn.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id=?`, id)
@@ -126,10 +132,11 @@ func (db *DB) scanRows(rows *sql.Rows) []Task {
 		t := Task{}
 		var sid, prURL, branch, lastHash, lastPRHash, lastErr sql.NullString
 		var lastFeedback sql.NullInt64
+		var pendingFeedback int
 		if err := rows.Scan(
 			&t.ID, &t.Status, &t.CLI, &sid, &prURL, &branch,
 			&t.Attempts, &t.IdleTicks, &lastHash, &lastPRHash,
-			&lastErr, &lastFeedback, &t.CreatedAt, &t.UpdatedAt,
+			&lastErr, &lastFeedback, &pendingFeedback, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			continue
 		}
@@ -140,6 +147,7 @@ func (db *DB) scanRows(rows *sql.Rows) []Task {
 		t.LastPRHash = lastPRHash.String
 		t.LastError = lastErr.String
 		t.LastFeedbackAt = lastFeedback.Int64
+		t.PendingFeedback = pendingFeedback != 0
 		out = append(out, t)
 	}
 	return out
@@ -186,6 +194,12 @@ func (db *DB) RunningCounts() map[string]int {
 func (db *DB) TotalOpen() int {
 	var n int
 	db.conn.QueryRow(`SELECT COUNT(*) FROM tasks WHERE status IN ('review','running')`).Scan(&n)
+	return n
+}
+
+func (db *DB) ReviewCount() int {
+	var n int
+	db.conn.QueryRow(`SELECT COUNT(*) FROM tasks WHERE status='review'`).Scan(&n)
 	return n
 }
 

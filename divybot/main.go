@@ -164,9 +164,17 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 			log.Printf("open PR cap (%d) reached", d.cfg.Timing.OpenPRCap)
 			return
 		}
-		// running+review both hold a slot — finish existing PRs before starting new work.
-		open := d.db.TotalOpen()
-		if open >= d.cfg.TotalCapacity() {
+		// Block new tasks while any PR is in review — finish existing work first.
+		if r := d.db.ReviewCount(); r > 0 {
+			log.Printf("holding new tasks: %d PR(s) in review", r)
+			return
+		}
+		running := d.db.RunningCounts()
+		total := 0
+		for _, n := range running {
+			total += n
+		}
+		if total >= d.cfg.TotalCapacity() {
 			return
 		}
 		picked := false
@@ -183,10 +191,7 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 			break
 		}
 		if !picked {
-			free := d.cfg.TotalCapacity() - open
-			if free > 0 {
-				log.Printf("idle: %d/%d slots free, no new tasks available", free, d.cfg.TotalCapacity())
-			}
+			log.Printf("idle: 0 review PRs but no new tasks available")
 		}
 	}
 	for {
@@ -572,8 +577,8 @@ func (d *Daemon) respawnForFeedback(t Task, prNum string, counts PRCounts) {
 	prompt := src.FeedbackPrompt(name, prNum, t.Branch, counts)
 	tmuxPaste(session, prompt)
 	d.db.Update(t.ID, map[string]any{
-		"status":          "running",
-		"attempts":        t.Attempts + 1,
+		"status":           "running",
+		"attempts":         t.Attempts + 1,
 		"last_feedback_at": time.Now().Unix(),
 	})
 	log.Printf("feedback respawn: %s (#%s) fail=%d cmt=%d rev=%d inline=%d",
