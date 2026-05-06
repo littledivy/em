@@ -506,6 +506,7 @@ _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN host TEXT DEFAULT 'localhost'",
     "ALTER TABLE tasks ADD COLUMN cli TEXT DEFAULT 'claude'",
     "ALTER TABLE tasks ADD COLUMN session_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN review_priority INTEGER DEFAULT 0",
 ]
 
 
@@ -1168,6 +1169,8 @@ def poll_unclaw() -> None:
         log(f"unclaw active: {slug}")
 
 
+REVIEW_WORKER_CAP = 10  # max concurrent workers on existing PRs
+
 def poll_review() -> None:
     """Watch every open-PR task (review/running/monitoring) for new signals.
 
@@ -1177,10 +1180,13 @@ def poll_review() -> None:
     """
     with db() as c:
         rows = c.execute(
-            "SELECT id, status, pr_url, COALESCE(repo,?) AS repo FROM tasks "
+            "SELECT id, status, pr_url, COALESCE(repo,?) AS repo, review_priority FROM tasks "
             "WHERE status IN ('review','running','monitoring') AND pr_url IS NOT NULL AND pr_url != ''",
             (UPSTREAM_REPO,),
         ).fetchall()
+        active_pr_workers = c.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status='running' AND pr_url IS NOT NULL AND pr_url != ''"
+        ).fetchone()[0]
 
     for row in rows:
         task = row["id"]
@@ -1230,9 +1236,17 @@ def poll_review() -> None:
             paste_update_to_live_worker(task, repo, pr_num, counts)
             continue
 
-        # status == 'review' — respawn worker. PR is still OPEN here (review-poll only
-        # iterates open PRs); operator policy: never abandon while PR is open.
+        # status == 'review' — respawn worker only for priority PRs (open before
+        # this fleet session). New PRs (review_priority=0) wait; they won't
+        # steal extra slots from pre-existing work.
+        if not row.get("review_priority"):
+            log(f"non-priority review PR, skipping respawn: {task}")
+            continue
+        if active_pr_workers >= REVIEW_WORKER_CAP:
+            log(f"review worker cap ({active_pr_workers}/{REVIEW_WORKER_CAP}); deferring {task}")
+            continue
         respawn_worker_for_feedback(task, repo, pr_num, counts)
+        active_pr_workers += 1
 
 
 def paste_update_to_live_worker(task: str, repo: str, pr_num: str, counts: dict[str, int]) -> None:
