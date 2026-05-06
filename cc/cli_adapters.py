@@ -86,7 +86,7 @@ class GeminiAdapter(CliAdapter):
 
 
 ADAPTERS: dict[str, CliAdapter] = {
-    "claude": ClaudeAdapter(name="claude", bin="claude"),
+    "claude": ClaudeAdapter(name="claude", bin="clawpatrol run claude"),
     "codex":  CodexAdapter(name="codex",  bin="codex"),
     "gemini": GeminiAdapter(name="gemini", bin="gemini"),
 }

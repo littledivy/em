@@ -16,7 +16,7 @@
 [[vm]]
 name     = "localhost"
 host     = "localhost"
-capacity = 8
+capacity = 2
 clis     = ["claude"]
 wt_base = "~/src/deno-wt"
 deno_src = "~/src/deno"
