@@ -351,7 +351,7 @@ func (d *Daemon) pollWorkers(trigger func()) {
 		switch {
 		case detectNoAction(pane):
 			log.Printf("no-action → review: %s", t.ID)
-			d.db.Update(t.ID, map[string]any{"status": "review", "last_error": "no-action"})
+			d.db.Update(t.ID, map[string]any{"status": "review", "last_error": "no-action", "last_pr_hash": ""})
 			tmuxKill(session)
 			trigger()
 
