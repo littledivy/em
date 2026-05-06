@@ -1535,10 +1535,18 @@ def pick_task() -> str | None:
     return None
 
 
-def _running_counts_per_host() -> dict[str, int]:
+def _running_counts_per_host(new_only: bool = False) -> dict[str, int]:
+    """Count running tasks per host. new_only=True counts only fresh tasks (no PR yet),
+    so review-respawn workers don't eat into the new-task spawn cap."""
     counts: dict[str, int] = {}
     with db() as c:
-        for r in c.execute("SELECT host, COUNT(*) c FROM tasks WHERE status='running' GROUP BY host"):
+        query = (
+            "SELECT host, COUNT(*) c FROM tasks WHERE status='running' "
+            "AND (pr_url IS NULL OR pr_url='') GROUP BY host"
+            if new_only else
+            "SELECT host, COUNT(*) c FROM tasks WHERE status='running' GROUP BY host"
+        )
+        for r in c.execute(query):
             counts[r["host"] or "localhost"] = r["c"]
     return counts
 
@@ -1560,7 +1568,7 @@ def spawn_worker(task: str) -> None:
     from cli_adapters import adapter_for
     import uuid as _uuid
 
-    counts = _running_counts_per_host()
+    counts = _running_counts_per_host(new_only=True)
     pick = pick_host_cli(counts)
     if not pick:
         log("no host with capacity; skipping spawn")
@@ -1736,7 +1744,7 @@ def tick() -> None:
         if open_prs >= OPEN_PR_CAP:
             log(f"open PR cap ({open_prs})")
             break
-        counts = _running_counts_per_host()
+        counts = _running_counts_per_host(new_only=True)
         total_running = sum(counts.values())
         if total_running >= total_capacity:
             log(f"all hosts full ({total_running}/{total_capacity})")
