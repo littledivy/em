@@ -43,13 +43,15 @@ class ClaudeAdapter(CliAdapter):
         # (we hit this with `claude-sonnet-4-7` which isn't a real model).
         return (
             f"{self.bin} --session-id {sid} --permission-mode bypassPermissions "
-            f"--model sonnet"
+            f"--model sonnet "
+            f"-n 'deno-bot:{task}'"
         )
 
     def resume(self, sid: str, task: str) -> str | None:
         return (
             f"{self.bin} --resume {sid} --permission-mode bypassPermissions "
-            f"--model sonnet"
+            f"--model sonnet "
+            f"-n 'deno-bot:{task}'"
         )
 
     def supports_remote_control(self) -> bool:
