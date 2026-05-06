@@ -164,17 +164,19 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 			log.Printf("open PR cap (%d) reached", d.cfg.Timing.OpenPRCap)
 			return
 		}
-		// Block new tasks while any PR is in review — finish existing work first.
-		if r := d.db.ReviewCount(); r > 0 {
-			log.Printf("holding new tasks: %d PR(s) in review", r)
-			return
-		}
+		// Review PRs reserve slots for potential feedback workers.
+		// New tasks only fill remaining capacity: running+review < total.
 		running := d.db.RunningCounts()
-		total := 0
+		runCount := 0
 		for _, n := range running {
-			total += n
+			runCount += n
 		}
-		if total >= d.cfg.TotalCapacity() {
+		inFlight := runCount + d.db.ReviewCount()
+		if inFlight >= d.cfg.TotalCapacity() {
+			if runCount < d.cfg.TotalCapacity() {
+				log.Printf("holding new tasks: %d running + %d review = %d/%d slots",
+					runCount, inFlight-runCount, inFlight, d.cfg.TotalCapacity())
+			}
 			return
 		}
 		picked := false
@@ -191,7 +193,7 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 			break
 		}
 		if !picked {
-			log.Printf("idle: 0 review PRs but no new tasks available")
+			log.Printf("idle: %d slot(s) free, no new tasks available", d.cfg.TotalCapacity()-inFlight)
 		}
 	}
 	for {
