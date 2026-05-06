@@ -220,14 +220,16 @@ func (d *Daemon) runInboxDeliverer(ctx context.Context, wg *sync.WaitGroup) {
 
 func (d *Daemon) runWorktreeSweeper(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	d.sweepWorktrees() // run immediately on startup
-	tick := time.NewTicker(1 * time.Hour)
+	d.reconcilePRs()   // adopt open PRs we don't know about
+	d.sweepWorktrees() // delete stale worktrees immediately
+	tick := time.NewTicker(15 * time.Minute)
 	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			d.reconcilePRs()
 			d.sweepWorktrees()
 		}
 	}
@@ -235,14 +237,47 @@ func (d *Daemon) runWorktreeSweeper(ctx context.Context, wg *sync.WaitGroup) {
 
 // WorktreeSweeper is an optional interface sources implement to enable cleanup.
 type WorktreeSweeper interface {
-	WorktreeBase() string // directory containing per-task worktree subdirs
-	MainRepo() string     // path to main git repo for "git worktree remove"
+	WorktreeBase() string
+	MainRepo() string
+	OpenBotPRs() []BotPR // list of open PRs the bot has on the upstream repo
+}
+
+// BotPR is a minimal PR descriptor returned by WorktreeSweeper.OpenBotPRs.
+type BotPR struct {
+	TaskName string
+	PRURL    string
+	Branch   string
+}
+
+// reconcilePRs adopts open bot PRs that aren't tracked in the DB.
+func (d *Daemon) reconcilePRs() {
+	for srcID, src := range d.sources {
+		sw, ok := src.(WorktreeSweeper)
+		if !ok {
+			continue
+		}
+		for _, pr := range sw.OpenBotPRs() {
+			taskID := srcID + ":" + pr.TaskName
+			if t := d.db.Get(taskID); t != nil && t.Status != "failed" {
+				continue // already tracked
+			}
+			d.db.Insert(taskID, "review", "claude", "", pr.Branch)
+			d.db.Update(taskID, map[string]any{"pr_url": pr.PRURL, "last_pr_hash": ""})
+			log.Printf("reconciled PR: %s → %s", taskID, pr.PRURL)
+		}
+	}
 }
 
 func (d *Daemon) sweepWorktrees() {
+	// Only keep worktrees for active tasks (running/review). Failed tasks get a
+	// fresh worktree on retry; keeping them wastes 15+ GB of Nix build artifacts.
 	keep := map[string]bool{}
-	for _, t := range d.db.WithStatuses("running", "review", "failed") {
+	reviewOnly := map[string]bool{}
+	for _, t := range d.db.WithStatuses("running", "review") {
 		keep[taskName(t.ID)] = true
+		if t.Status == "review" {
+			reviewOnly[taskName(t.ID)] = true
+		}
 	}
 	for _, src := range d.sources {
 		sw, ok := src.(WorktreeSweeper)
@@ -255,13 +290,21 @@ func (d *Daemon) sweepWorktrees() {
 			continue
 		}
 		for _, e := range entries {
-			if keep[e.Name()] {
+			wt := filepath.Join(base, e.Name())
+			if !keep[e.Name()] {
+				sh(sw.MainRepo(), nil, "git", "worktree", "remove", "--force", wt) //nolint
+				os.RemoveAll(wt)
+				log.Printf("swept worktree: %s", e.Name())
 				continue
 			}
-			wt := filepath.Join(base, e.Name())
-			sh(sw.MainRepo(), nil, "git", "worktree", "remove", "--force", wt) //nolint
-			os.RemoveAll(wt)
-			log.Printf("swept worktree: %s", e.Name())
+			// PR is open but build artifacts no longer needed — free target/
+			if reviewOnly[e.Name()] {
+				target := filepath.Join(wt, "target")
+				if _, err := os.Stat(target); err == nil {
+					os.RemoveAll(target)
+					log.Printf("freed target/: %s", e.Name())
+				}
+			}
 		}
 	}
 }

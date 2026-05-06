@@ -68,9 +68,44 @@ func (s *NodeCompatSource) loadTemplates() {
 	s.feedTmpl = string(fb)
 }
 
-func (s *NodeCompatSource) ID() string             { return "nodecompat" }
-func (s *NodeCompatSource) WorktreeBase() string   { return s.cfg.WTBase }
-func (s *NodeCompatSource) MainRepo() string       { return s.cfg.DenoSrc }
+func (s *NodeCompatSource) ID() string           { return "nodecompat" }
+func (s *NodeCompatSource) WorktreeBase() string { return s.cfg.WTBase }
+func (s *NodeCompatSource) MainRepo() string     { return s.cfg.DenoSrc }
+
+func (s *NodeCompatSource) OpenBotPRs() []BotPR {
+	out, err := sh("", nil, "gh", "pr", "list",
+		"--repo", s.cfg.UpstreamRepo,
+		"--author", s.cfg.BotUser,
+		"--state", "open",
+		"--json", "number,url,headRefName",
+		"--limit", "100",
+	)
+	if err != nil {
+		return nil
+	}
+	var prs []struct {
+		Number      int    `json:"number"`
+		URL         string `json:"url"`
+		HeadRefName string `json:"headRefName"`
+	}
+	if err := json.Unmarshal([]byte(out), &prs); err != nil {
+		return nil
+	}
+	var result []BotPR
+	for _, pr := range prs {
+		// Branch format: claude/<taskName>
+		taskName := strings.TrimPrefix(pr.HeadRefName, "claude/")
+		if taskName == pr.HeadRefName {
+			continue // not a claude/ branch
+		}
+		result = append(result, BotPR{
+			TaskName: taskName,
+			PRURL:    pr.URL,
+			Branch:   pr.HeadRefName,
+		})
+	}
+	return result
+}
 
 func (s *NodeCompatSource) Configure(body hcl.Body) error {
 	var cfg NodeCompatConfig
