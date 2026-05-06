@@ -384,14 +384,15 @@ func (d *Daemon) pollWorkers(trigger func()) {
 
 func (d *Daemon) handleDone(t Task, pane string) {
 	tmuxKill(sessionFor(t.ID))
+	src := d.sourceFor(t.ID)
 	if t.PRURL != "" {
 		// Feedback session: worker committed/pushed itself per prompt instructions.
 		// Just return to review so PR monitor picks up CI results.
 		d.db.Update(t.ID, map[string]any{"status": "review", "last_pr_hash": "", "session_id": ""})
 		log.Printf("feedback done → review: %s", t.ID)
+		d.freeTarget(src, taskName(t.ID))
 		return
 	}
-	src := d.sourceFor(t.ID)
 	if src == nil {
 		return
 	}
@@ -408,6 +409,17 @@ func (d *Daemon) handleDone(t Task, pane string) {
 		"session_id":  "",
 	})
 	log.Printf("PR opened: %s → %s", t.ID, prURL)
+	d.freeTarget(src, taskName(t.ID))
+}
+
+func (d *Daemon) freeTarget(src Source, name string) {
+	if src == nil {
+		return
+	}
+	target := filepath.Join(src.WorktreeDir(name), "target")
+	if err := os.RemoveAll(target); err == nil {
+		log.Printf("freed target/: %s", name)
+	}
 }
 
 // ── PR monitoring ─────────────────────────────────────────────────────────────

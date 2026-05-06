@@ -28,6 +28,42 @@ func initTmux() {
 	socketDir = "/tmp/divybot-sockets"
 	socket = filepath.Join(socketDir, "divybot.sock")
 	os.MkdirAll(socketDir, 0755)
+	// Ensure tmux server is running so setenv works.
+	exec.Command(tmuxBin, "-S", socket, "start-server").Run() //nolint
+	pushSccacheEnv()
+}
+
+// pushSccacheEnv sets RUSTC_WRAPPER=sccache and related vars as tmux global
+// env so every worker pane inherits them without touching worktree files.
+func pushSccacheEnv() {
+	sccacheBin := "/opt/homebrew/bin/sccache"
+	if _, err := os.Stat(sccacheBin); err != nil {
+		sccacheBin = "sccache"
+	}
+
+	set := func(k, v string) { tmuxSilent("setenv", "-g", k, v) }
+
+	// Load S3/MinIO creds from sccache.env if present.
+	envFile := expandHome("~/.divybot/sccache.env")
+	if b, err := os.ReadFile(envFile); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			line = strings.TrimPrefix(line, "export ")
+			k, v, ok := strings.Cut(line, "=")
+			if ok {
+				set(strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"`))
+			}
+		}
+	}
+
+	set("RUSTC_WRAPPER", sccacheBin)
+	set("SCCACHE_DIR", expandHome("~/.cache/sccache"))
+	set("SCCACHE_CACHE_SIZE", "60G")
+	set("CARGO_NET_OFFLINE", "true")
+	log.Printf("sccache env pushed (wrapper=%s)", sccacheBin)
 }
 
 func tmux(args ...string) (string, error) {
