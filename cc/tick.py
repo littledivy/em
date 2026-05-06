@@ -1457,10 +1457,16 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         # Slim nudge — gh cmd hints, HEREDOC commit example, trailer instruction
         # all live in prompt.md and the resumed session already has them.
         suffix = f"  ⚠️ MERGE CONFLICT — `git fetch origin && git rebase origin/main` then `git push {push_remote} HEAD --force-with-lease`." if counts.get("conflict") else ""
+        flaky_hint = ""
+        if counts["fail"] > 0 and counts["comments"] == 0 and counts["reviews"] == 0 and counts["inline"] == 0 and not counts.get("conflict"):
+            flaky_hint = (
+                f"  If the failures look flaky/unrelated to your change, push an empty commit to re-trigger CI: "
+                f"`git commit --allow-empty -m \"$(cat <<'EOF'\nci: retrigger\n\nCo-authored-by: Divy Srivastava <me@littledivy.com>\nEOF\n)\" && git push {push_remote} HEAD`."
+            )
         fb = (
             f"PR #{pr_num} has new activity (counts: fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}). "
             f"Address everything per prompt.md, push, then `<<NODE_BOT_DONE>> <one-line summary>`."
-            f"{suffix}"
+            f"{flaky_hint}{suffix}"
         )
     tmux_paste(session, fb, host=host)
     with db() as c:
