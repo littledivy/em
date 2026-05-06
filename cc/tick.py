@@ -1460,8 +1460,7 @@ def respawn_worker_for_feedback(task: str, repo: str, pr_num: str, counts: dict[
         flaky_hint = ""
         if counts["fail"] > 0 and counts["comments"] == 0 and counts["reviews"] == 0 and counts["inline"] == 0 and not counts.get("conflict"):
             flaky_hint = (
-                f"  If the failures look flaky/unrelated to your change, push an empty commit to re-trigger CI: "
-                f"`git commit --allow-empty -m \"$(cat <<'EOF'\nci: retrigger\n\nCo-authored-by: Divy Srivastava <me@littledivy.com>\nEOF\n)\" && git push {push_remote} HEAD`."
+                "  If the failures look flaky/unrelated to your change, push an empty commit to re-trigger CI."
             )
         fb = (
             f"PR #{pr_num} has new activity (counts: fail={counts['fail']} cmt={counts['comments']} rev={counts['reviews']} inline={counts['inline']}). "
