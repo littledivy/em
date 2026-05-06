@@ -164,12 +164,9 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 			log.Printf("open PR cap (%d) reached", d.cfg.Timing.OpenPRCap)
 			return
 		}
-		running := d.db.RunningCounts()
-		total := 0
-		for _, n := range running {
-			total += n
-		}
-		if total >= d.cfg.TotalCapacity() {
+		// running+review both hold a slot — finish existing PRs before starting new work.
+		open := d.db.TotalOpen()
+		if open >= d.cfg.TotalCapacity() {
 			return
 		}
 		picked := false
@@ -186,8 +183,10 @@ func (d *Daemon) runSpawner(ctx context.Context, wg *sync.WaitGroup, slots <-cha
 			break
 		}
 		if !picked {
-			free := d.cfg.TotalCapacity() - total
-			log.Printf("idle: %d/%d slots free, no tasks available", free, d.cfg.TotalCapacity())
+			free := d.cfg.TotalCapacity() - open
+			if free > 0 {
+				log.Printf("idle: %d/%d slots free, no new tasks available", free, d.cfg.TotalCapacity())
+			}
 		}
 	}
 	for {
