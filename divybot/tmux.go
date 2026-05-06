@@ -43,8 +43,11 @@ func pushSccacheEnv() {
 
 	set := func(k, v string) { tmuxSilent("setenv", "-g", k, v) }
 
-	// Load S3/MinIO creds from sccache.env if present.
+	// Load S3/MinIO creds from sccache.env if present (fall back to cc's path).
 	envFile := expandHome("~/.divybot/sccache.env")
+	if _, err := os.Stat(envFile); err != nil {
+		envFile = expandHome("~/.deno-bot/sccache.env")
+	}
 	if b, err := os.ReadFile(envFile); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
 			line = strings.TrimSpace(line)
