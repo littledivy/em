@@ -1239,7 +1239,7 @@ def poll_review() -> None:
         # status == 'review' — respawn worker only for priority PRs (open before
         # this fleet session). New PRs (review_priority=0) wait; they won't
         # steal extra slots from pre-existing work.
-        if not row.get("review_priority"):
+        if not row["review_priority"]:
             log(f"non-priority review PR, skipping respawn: {task}")
             continue
         if active_pr_workers >= REVIEW_WORKER_CAP:
