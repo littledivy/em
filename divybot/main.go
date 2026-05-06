@@ -241,6 +241,11 @@ func (d *Daemon) runWorktreeSweeper(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
+// WorktreeRecoverer can recreate a worktree from an existing remote branch.
+type WorktreeRecoverer interface {
+	RecoverWorktree(taskName, branch string) error
+}
+
 // WorktreeSweeper is an optional interface sources implement to enable cleanup.
 type WorktreeSweeper interface {
 	WorktreeBase() string
@@ -550,8 +555,18 @@ func (d *Daemon) respawnForFeedback(t Task, prNum string, counts PRCounts) {
 	wt := src.WorktreeDir(name)
 
 	if _, err := os.Stat(wt); err != nil {
-		log.Printf("worktree gone, can't respawn: %s", t.ID)
-		return
+		// Worktree was swept — recover it from the existing bot branch.
+		if err := src.Setup(name); err != nil {
+			log.Printf("worktree recover failed: %s: %v", t.ID, err)
+			return
+		}
+		// Fetch and reset to the PR branch so we don't clobber the existing commits.
+		if wr, ok := src.(WorktreeRecoverer); ok {
+			if err := wr.RecoverWorktree(name, t.Branch); err != nil {
+				log.Printf("branch recover failed: %s: %v", t.ID, err)
+				return
+			}
+		}
 	}
 
 	session := sessionFor(t.ID)

@@ -232,6 +232,30 @@ func (s *NodeCompatSource) fetchFailingTests() []string {
 	return out
 }
 
+// ── Worktree recovery ────────────────────────────────────────────────────────
+
+// RecoverWorktree resets an existing (freshly re-created) worktree to the bot
+// branch so the feedback session sees the PR's actual commits.
+func (s *NodeCompatSource) RecoverWorktree(taskName, branch string) error {
+	wt := s.WorktreeDir(taskName)
+	token, err := ghToken(s.cfg.BotUser)
+	if err != nil {
+		return fmt.Errorf("gh token: %w", err)
+	}
+	env := append(gitEnv(s.cfg.BotUser), "GH_TOKEN="+token)
+	botURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", token, s.cfg.BotFork)
+	sh(wt, nil, "git", "remote", "rm", "bot")                           //nolint
+	sh(wt, nil, "git", "remote", "add", "bot", botURL)                  //nolint
+	if out, err := sh(wt, env, "git", "fetch", "bot", branch); err != nil {
+		return fmt.Errorf("fetch bot/%s: %s", branch, out)
+	}
+	if out, err := sh(wt, env, "git", "reset", "--hard", "FETCH_HEAD"); err != nil {
+		return fmt.Errorf("reset to FETCH_HEAD: %s", out)
+	}
+	log.Printf("recovered worktree %s → %s", taskName, branch)
+	return nil
+}
+
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 func (s *NodeCompatSource) Setup(taskName string) error {
