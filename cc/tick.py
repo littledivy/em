@@ -1754,12 +1754,6 @@ def tick() -> None:
             open_prs = c.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status IN ('review','monitoring')"
             ).fetchone()[0]
-            review_prs = c.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'review'"
-            ).fetchone()[0]
-        if review_prs > 0:
-            log(f"review PRs pending ({review_prs}); skipping new spawns")
-            break
         if open_prs >= OPEN_PR_CAP:
             log(f"open PR cap ({open_prs})")
             break
