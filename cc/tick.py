@@ -692,6 +692,14 @@ def git(*args: str, cwd: str | Path, env: dict | None = None,
 
 def git_env(author: str, email: str | None = None) -> dict[str, str]:
     e = os.environ.copy()
+    # Strip clawpatrol/unclaw MITM CA vars — they leak in from the orch shell
+    # and break direct https pushes (the unclaw CA bundle has no LE root, so
+    # github.com cert verification fails). Workers on unclaw hosts re-set
+    # these via their own env; local pushes must go to system trust store.
+    for k in ("SSL_CERT_FILE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+              "NODE_EXTRA_CA_CERTS", "DENO_CERT", "PIP_CERT",
+              "REQUESTS_CA_BUNDLE", "NIX_SSL_CERT_FILE"):
+        e.pop(k, None)
     e["GIT_AUTHOR_NAME"] = author
     e["GIT_AUTHOR_EMAIL"] = email or f"{author}@users.noreply.github.com"
     e["GIT_COMMITTER_NAME"] = author
